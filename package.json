@@ -2,7 +2,7 @@
   "name": "sun-deploy",
   "version": "1.0.0",
   "private": true,
-  "description": "Sun Ecosystem — Deploy Toolkit",
+  "description": "Sun — Deploy Toolkit",
   "scripts": {
     "deploy": "bash deploy-all.sh",
     "deploy:dry": "bash deploy-all.sh --dry-run",

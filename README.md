@@ -1,6 +1,6 @@
 # Sun Deploy Toolkit
 
-Shared deployment infrastructure for the Sun ecosystem. Contains:
+Shared deployment infrastructure for all services. Contains:
 
 - **`lib.sh`** — Shared deploy library sourced by each service's `deploy.sh`
 - **`deploy-all.sh`** — Orchestrator that deploys all services in dependency order

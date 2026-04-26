@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# Sun Ecosystem — Deploy All Services
+# Sun — Deploy All Services
 #
 # Orchestrates `npm run deploy` across all services with
 # proper dependency ordering and parallelism.
@@ -228,7 +228,7 @@ DEPLOY_START=$SECONDS
 # ── Header ────────────────────────────────────────────────────
 echo ""
 echo -e "${MAGENTA}${BOLD}══════════════════════════════════════════════════════════════${RESET}"
-echo -e "${MAGENTA}${BOLD}  ☀️  Sun Ecosystem — Deploy All Services${RESET}"
+echo -e "${MAGENTA}${BOLD}  ☀️  Sun — Deploy All Services${RESET}"
 if $DRY_RUN; then
   echo -e "${YELLOW}${BOLD}  ⚠  DRY RUN — no changes will be made${RESET}"
 fi
