@@ -1,0 +1,22 @@
+{
+  "name": "sun-deploy",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Sun Ecosystem — Deploy Toolkit",
+  "scripts": {
+    "deploy": "bash deploy-all.sh",
+    "deploy:dry": "bash deploy-all.sh --dry-run",
+    "deploy:vault": "bash deploy-all.sh --only=vault",
+    "deploy:apis": "bash deploy-all.sh --only=tools-api,api,lights",
+    "deploy:gateway": "bash deploy-all.sh --only=prism",
+    "deploy:clients": "bash deploy-all.sh --only=retina,portal,rod-dev,lupos",
+    "deploy:prism": "bash ../prism/deploy.sh",
+    "deploy:tools-api": "bash ../tools-api/deploy.sh",
+    "deploy:api": "bash ../api/deploy.sh",
+    "deploy:lights": "bash ../lights/deploy.sh",
+    "deploy:lupos": "bash ../lupos/deploy.sh",
+    "deploy:retina": "bash ../retina/deploy.sh",
+    "deploy:portal": "bash ../portal/deploy.sh",
+    "deploy:rod-dev": "bash ../rod-dev/deploy.sh"
+  }
+}
