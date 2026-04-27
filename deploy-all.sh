@@ -32,7 +32,7 @@ LOG_DIR="${SCRIPT_DIR}/.deploy-logs"
 TIER_0=(vault)
 TIER_1=(tools-api api lights)
 TIER_2=(prism)
-TIER_3=(retina portal rod-dev lupos)
+TIER_3=(retina portal rod-dev lupos clock-crew)
 
 ALL_SERVICES=("${TIER_0[@]}" "${TIER_1[@]}" "${TIER_2[@]}" "${TIER_3[@]}")
 
@@ -48,6 +48,7 @@ declare -A SVC_COLORS=(
   [rod-dev]="\033[93m"    # bright yellow
   [retina]="\033[95m"     # bright magenta
   [portal]="\033[96m"     # bright cyan
+  [clock-crew]="\033[96m"     # bright cyan
 )
 
 # ── Flags ─────────────────────────────────────────────────────
