@@ -110,13 +110,23 @@ BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
 info "Branch: ${GIT_BRANCH} @ ${GIT_SHA}"
 info "Time:   ${BUILD_TIME}"
 
-# ── Detect SSH access ────────────────────────────────────────
+# ── Detect SSH access (retry with jittered backoff for parallel tiers) ──
 HAS_SSH=false
-if ssh -o ConnectTimeout=3 -o BatchMode=yes "$NAS_HOST" "true" 2>/dev/null; then
-  HAS_SSH=true
-  ok "SSH access to ${NAS_HOST} confirmed"
-else
-  warn "SSH to '${NAS_HOST}' unavailable — will fall back to SMB export"
+for _ssh_attempt in 1 2; do
+  if ssh -o ConnectTimeout=8 -o BatchMode=yes "$NAS_HOST" "true" 2>/dev/null; then
+    HAS_SSH=true
+    ok "SSH access to ${NAS_HOST} confirmed"
+    break
+  fi
+  if [ "$_ssh_attempt" -eq 1 ]; then
+    # Jittered backoff: 2-5s random delay before retry (avoids thundering herd)
+    _jitter=$(( (RANDOM % 4) + 2 ))
+    info "SSH probe failed — retrying in ${_jitter}s..."
+    sleep "$_jitter"
+  fi
+done
+if ! $HAS_SSH; then
+  warn "SSH to '${NAS_HOST}' unavailable after 2 attempts — will fall back to SMB export"
 fi
 
 # ── 1. Pull latest ────────────────────────────────────────────
@@ -222,12 +232,30 @@ else
     docker save "$TAG_LATEST" | gzip > "/tmp/${TARBALL}"
 
     info "Copying to NAS..."
-    mkdir -p "${NAS_SMB_DIR}"
-    cp "/tmp/${TARBALL}" "${NAS_SMB_DIR}/${TARBALL}"
-    cp "${SCRIPT_DIR}/docker-compose.yml" "${NAS_SMB_DIR}/docker-compose.yml"
+    if ! mkdir -p "${NAS_SMB_DIR}" 2>/dev/null; then
+      rm -f "/tmp/${TARBALL}"
+      echo -e "  ${RED}✖ Cannot create ${NAS_SMB_DIR} — is /mnt/k mounted? Check permissions.${RESET}" >&2
+      exit 1
+    fi
+
+    if ! cp "/tmp/${TARBALL}" "${NAS_SMB_DIR}/${TARBALL}"; then
+      rm -f "/tmp/${TARBALL}"
+      echo -e "  ${RED}✖ Failed to copy image tarball to ${NAS_SMB_DIR}${RESET}" >&2
+      exit 1
+    fi
+
+    if ! cp "${SCRIPT_DIR}/docker-compose.yml" "${NAS_SMB_DIR}/docker-compose.yml"; then
+      rm -f "/tmp/${TARBALL}"
+      echo -e "  ${RED}✖ Failed to copy docker-compose.yml to ${NAS_SMB_DIR}${RESET}" >&2
+      exit 1
+    fi
 
     if [ "$SKIP_ENV_DEPLOY" != "true" ] && [ -f "$DEPLOY_ENV" ]; then
-      cp "$DEPLOY_ENV" "${NAS_SMB_DIR}/.env"
+      if ! cp "$DEPLOY_ENV" "${NAS_SMB_DIR}/.env"; then
+        rm -f "/tmp/${TARBALL}"
+        echo -e "  ${RED}✖ Failed to copy .env to ${NAS_SMB_DIR}${RESET}" >&2
+        exit 1
+      fi
     fi
 
     # Call optional extra SMB sync hook
