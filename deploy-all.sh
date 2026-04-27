@@ -6,18 +6,18 @@
 # proper dependency ordering and parallelism.
 #
 # Tiers (sequential between tiers, parallel within):
-#   0. Foundation   — vault (secret store, must be up first)
-#   1. APIs         — tools-api, api, lights
-#   2. Gateway      — prism (depends on tools-api)
-#   3. Clients/Bots — retina, portal, rod-dev, lupos
+#   0. Foundation   — vault-service (secret store, must be up first)
+#   1. APIs         — tools-service, portal-service, lights-service, clock-crew-service
+#   2. Gateway      — prism-service (depends on tools-service)
+#   3. Clients/Bots — retina-client, portal-client, rod-dev-client, lupos-bot, clock-crew-client
 #
 # Usage:
 #   npm run deploy                         # full deploy
 #   npm run deploy -- --dry-run            # validate only
 #   npm run deploy -- --skip-pull          # skip git pull
 #   npm run deploy -- --no-cache           # rebuild images from scratch
-#   npm run deploy -- --only=prism,retina  # deploy specific services
-#   npm run deploy -- --skip=lupos,lights  # skip specific services
+#   npm run deploy -- --only=prism-service,retina-client  # deploy specific services
+#   npm run deploy -- --skip=lupos-bot,lights-service  # skip specific services
 #   npm run deploy -- --no-parallel        # disable parallel builds
 # ============================================================
 
@@ -29,26 +29,27 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"   # sun/ parent directory
 LOG_DIR="${SCRIPT_DIR}/.deploy-logs"
 
 # Deployment tiers — sequential between tiers, parallel within
-TIER_0=(vault)
-TIER_1=(tools-api api lights)
-TIER_2=(prism)
-TIER_3=(retina portal rod-dev lupos clock-crew)
+TIER_0=(vault-service)
+TIER_1=(tools-service portal-service lights-service clock-crew-service)
+TIER_2=(prism-service)
+TIER_3=(retina-client portal-client rod-dev-client lupos-bot clock-crew-client)
 
 ALL_SERVICES=("${TIER_0[@]}" "${TIER_1[@]}" "${TIER_2[@]}" "${TIER_3[@]}")
 
 # ── Service colors (for prefixed output in parallel mode) ─────
 # Each service gets a unique color so interleaved output is readable
 declare -A SVC_COLORS=(
-  [vault]="\033[33m"      # yellow
-  [prism]="\033[36m"      # cyan
-  [tools-api]="\033[35m"  # magenta
-  [api]="\033[34m"        # blue
-  [lights]="\033[32m"     # green
-  [lupos]="\033[91m"      # bright red
-  [rod-dev]="\033[93m"    # bright yellow
-  [retina]="\033[95m"     # bright magenta
-  [portal]="\033[96m"     # bright cyan
-  [clock-crew]="\033[96m"     # bright cyan
+  [vault-service]="\033[33m"          # yellow
+  [prism-service]="\033[36m"          # cyan
+  [tools-service]="\033[35m"          # magenta
+  [portal-service]="\033[34m"         # blue
+  [lights-service]="\033[32m"         # green
+  [clock-crew-service]="\033[94m"     # bright blue
+  [lupos-bot]="\033[91m"              # bright red
+  [rod-dev-client]="\033[93m"         # bright yellow
+  [retina-client]="\033[95m"          # bright magenta
+  [portal-client]="\033[96m"          # bright cyan
+  [clock-crew-client]="\033[96m"      # bright cyan
 )
 
 # ── Flags ─────────────────────────────────────────────────────
