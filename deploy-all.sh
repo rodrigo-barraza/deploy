@@ -7,9 +7,8 @@
 #
 # Tiers (sequential between tiers, parallel within):
 #   0. Foundation   — vault-service (secret store, must be up first)
-#   1. APIs         — tools-service, portal-service, lights-service, clock-crew-service
-#   2. Gateway      — prism-service (depends on tools-service)
-#   3. Clients/Bots — retina-client, portal-client, rod-dev-client, lupos-bot, clock-crew-client
+#   1. APIs         — prism-service, tools-service, portal-service, lights-service, clock-crew-service
+#   2. Clients/Bots — retina-client, portal-client, rod-dev-client, lupos-bot, clock-crew-client
 #
 # Usage:
 #   npm run deploy                         # full deploy
@@ -30,11 +29,10 @@ LOG_DIR="${SCRIPT_DIR}/.deploy-logs"
 
 # Deployment tiers — sequential between tiers, parallel within
 TIER_0=(vault-service)
-TIER_1=(tools-service portal-service lights-service clock-crew-service)
-TIER_2=(prism-service)
-TIER_3=(retina-client portal-client rod-dev-client lupos-bot clock-crew-client)
+TIER_1=(prism-service tools-service portal-service lights-service clock-crew-service)
+TIER_2=(retina-client portal-client rod-dev-client lupos-bot clock-crew-client)
 
-ALL_SERVICES=("${TIER_0[@]}" "${TIER_1[@]}" "${TIER_2[@]}" "${TIER_3[@]}")
+ALL_SERVICES=("${TIER_0[@]}" "${TIER_1[@]}" "${TIER_2[@]}")
 
 # ── Service colors (for prefixed output in parallel mode) ─────
 # Each service gets a unique color so interleaved output is readable
@@ -276,11 +274,8 @@ fi
 header "━━━ TIER 1 — APIs & Services ━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 deploy_tier "Tier 1 — APIs & Services" "${TIER_1[@]}"
 
-header "━━━ TIER 2 — Gateway ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-deploy_tier "Tier 2 — Gateway" "${TIER_2[@]}"
-
-header "━━━ TIER 3 — Clients & Bots ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-deploy_tier "Tier 3 — Clients & Bots" "${TIER_3[@]}"
+header "━━━ TIER 2 — Clients & Bots ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+deploy_tier "Tier 2 — Clients & Bots" "${TIER_2[@]}"
 
 # ── Summary ───────────────────────────────────────────────────
 TOTAL=$((SECONDS - DEPLOY_START))

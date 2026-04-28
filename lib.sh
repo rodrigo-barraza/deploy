@@ -92,7 +92,7 @@ step "Validating deployment files"
 DEPLOY_ENV="${SCRIPT_DIR}/.env.deploy"
 if [ "$SKIP_ENV_DEPLOY" != "true" ]; then
   if [ ! -f "$DEPLOY_ENV" ]; then
-    fail ".env.deploy not found at ${DEPLOY_ENV} — create it with runtime env vars (VAULT_URL, VAULT_TOKEN, etc.)"
+    fail ".env.deploy not found at ${DEPLOY_ENV} — create it with runtime env vars (VAULT_SERVICE_URL, VAULT_SERVICE_TOKEN, etc.)"
   fi
   ok ".env.deploy found ($(wc -l < "$DEPLOY_ENV") lines)"
 fi
