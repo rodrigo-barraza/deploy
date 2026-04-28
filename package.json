@@ -6,17 +6,19 @@
   "scripts": {
     "deploy": "bash deploy-all.sh",
     "deploy:dry": "bash deploy-all.sh --dry-run",
-    "deploy:vault": "bash deploy-all.sh --only=vault",
-    "deploy:apis": "bash deploy-all.sh --only=tools-api,api,lights",
-    "deploy:gateway": "bash deploy-all.sh --only=prism",
-    "deploy:clients": "bash deploy-all.sh --only=retina,portal,rod-dev,lupos",
-    "deploy:prism": "bash ../prism/deploy.sh",
-    "deploy:tools-api": "bash ../tools-api/deploy.sh",
-    "deploy:api": "bash ../api/deploy.sh",
-    "deploy:lights": "bash ../lights/deploy.sh",
-    "deploy:lupos": "bash ../lupos/deploy.sh",
-    "deploy:retina": "bash ../retina/deploy.sh",
-    "deploy:portal": "bash ../portal/deploy.sh",
-    "deploy:rod-dev": "bash ../rod-dev/deploy.sh"
+    "deploy:vault": "bash deploy-all.sh --only=vault-service",
+    "deploy:apis": "bash deploy-all.sh --only=tools-service,portal-service,lights-service",
+    "deploy:gateway": "bash deploy-all.sh --only=prism-service",
+    "deploy:clients": "bash deploy-all.sh --only=retina-client,portal-client,rod-dev-client,lupos-bot",
+    "deploy:prism-service": "bash ../prism-service/deploy.sh",
+    "deploy:tools-service": "bash ../tools-service/deploy.sh",
+    "deploy:portal-service": "bash ../portal-service/deploy.sh",
+    "deploy:lights-service": "bash ../lights-service/deploy.sh",
+    "deploy:lupos-bot": "bash ../lupos-bot/deploy.sh",
+    "deploy:retina-client": "bash ../retina-client/deploy.sh",
+    "deploy:portal-client": "bash ../portal-client/deploy.sh",
+    "deploy:rod-dev-client": "bash ../rod-dev-client/deploy.sh",
+    "deploy:clock-crew-service": "bash ../clock-crew-service/deploy.sh",
+    "deploy:clock-crew-client": "bash ../clock-crew-client/deploy.sh"
   }
 }

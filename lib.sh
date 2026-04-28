@@ -4,8 +4,8 @@
 #
 # Source this file from a per-service deploy.sh after setting:
 #
-#   IMAGE_NAME       (required)  e.g. "prism"
-#   DISPLAY_NAME     (optional)  e.g. "🔷 Prism"     — defaults to IMAGE_NAME
+#   IMAGE_NAME       (required)  e.g. "prism-service"
+#   DISPLAY_NAME     (optional)  e.g. "🔷 Prism Service"     — defaults to IMAGE_NAME
 #   BUILD_ARGS       (optional)  extra --build-arg flags
 #   BUILD_EXTRA_FLAGS(optional)  e.g. "--network=host"
 #   BUILD_TAIL_LINES (optional)  lines of build output to show (default: 5)
