@@ -1,8 +1,8 @@
 {
-  "name": "sun-deploy",
+  "name": "sun-deploy-kit",
   "version": "1.0.0",
   "private": true,
-  "description": "Sun — Deploy Toolkit",
+  "description": "Sun — Deploy Kit",
   "scripts": {
     "deploy": "bash deploy-all.sh",
     "deploy:dry": "bash deploy-all.sh --dry-run",

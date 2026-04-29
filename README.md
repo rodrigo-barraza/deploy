@@ -1,4 +1,4 @@
-# Sun Deploy Toolkit
+# Sun Deploy Kit
 
 Shared deployment infrastructure for all services. Contains:
 
@@ -14,7 +14,7 @@ Each service repo has a thin `deploy.sh` wrapper that sets its config and source
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 IMAGE_NAME="prism"
 DISPLAY_NAME="🔷 Prism"
-source "${SCRIPT_DIR}/../deploy/lib.sh"
+source "${SCRIPT_DIR}/../deploy-kit/lib.sh"
 ```
 
 The library handles the full pipeline: flag parsing, git pull, Docker build, SSH transfer, container restart, image pruning, and SMB fallback.

@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# Sun Deploy Toolkit — Shared Library
+# Sun Deploy Kit — Shared Library
 #
 # Source this file from a per-service deploy.sh after setting:
 #
