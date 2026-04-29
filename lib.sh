@@ -46,6 +46,14 @@ BUILD_EXTRA_FLAGS="${BUILD_EXTRA_FLAGS:-}"
 BUILD_TAIL_LINES="${BUILD_TAIL_LINES:-5}"
 SKIP_ENV_DEPLOY="${SKIP_ENV_DEPLOY:-false}"
 
+# ── Compression ───────────────────────────────────────────────
+# Prefer pigz (parallel gzip) for 3-5x faster image compression
+if command -v pigz &>/dev/null; then
+  GZIP_CMD="pigz"
+else
+  GZIP_CMD="gzip"
+fi
+
 NAS_HOST="nas"                                        # SSH config alias
 NAS_COMPOSE_DIR="/volume1/docker/${IMAGE_NAME}"       # Synology path
 NAS_SMB_DIR="/mnt/k/${IMAGE_NAME}"                    # SMB fallback
@@ -161,7 +169,9 @@ if ! $DEPLOY_ONLY; then
     info "(skipped — dry run)"
   else
     BUILD_START_INNER=$SECONDS
-    docker build \
+    # Run with pipefail in a subshell so tail/sed don't swallow build failures
+    set +e
+    (set -o pipefail; docker build \
       $NO_CACHE \
       $BUILD_EXTRA_FLAGS \
       $BUILD_ARGS \
@@ -170,7 +180,13 @@ if ! $DEPLOY_ONLY; then
       --label "build.time=${BUILD_TIME}" \
       -t "$TAG_LATEST" \
       -t "$TAG_SHA" \
-      . 2>&1 | tail -${BUILD_TAIL_LINES} | sed 's/^/  /'
+      . 2>&1 | tail -${BUILD_TAIL_LINES} | sed 's/^/  /')
+    BUILD_EXIT=$?
+    set -e
+    if [ "$BUILD_EXIT" -ne 0 ]; then
+      fail "Build failed (exit ${BUILD_EXIT}) in $((SECONDS - BUILD_START_INNER))s"
+      exit 1
+    fi
     ok "Built in $((SECONDS - BUILD_START_INNER))s"
   fi
 
@@ -255,7 +271,7 @@ if $HAS_SSH; then
     # Pipe image directly — no temp file, no SMB
     TRANSFER_START=$SECONDS
     info "Piping image over SSH (this may take a moment)..."
-    docker save "$TAG_LATEST" | gzip | ssh "$NAS_HOST" "gunzip | sudo ${DOCKER_BIN} load"
+    docker save "$TAG_LATEST" | $GZIP_CMD | ssh "$NAS_HOST" "gunzip | sudo ${DOCKER_BIN} load"
     ok "Image transferred in $((SECONDS - TRANSFER_START))s"
 
     # Restart container
@@ -282,7 +298,7 @@ else
     TARBALL="${IMAGE_NAME}.tar.gz"
 
     info "Saving image..."
-    docker save "$TAG_LATEST" | gzip > "/tmp/${TARBALL}"
+    docker save "$TAG_LATEST" | $GZIP_CMD > "/tmp/${TARBALL}"
 
     info "Copying to NAS..."
     if ! mkdir -p "${NAS_SMB_DIR}" 2>/dev/null; then

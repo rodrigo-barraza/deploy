@@ -6,6 +6,9 @@
   "scripts": {
     "deploy": "bash deploy-all.sh",
     "deploy:dry": "bash deploy-all.sh --dry-run",
+    "deploy:changed": "bash deploy-all.sh --changed-only",
+    "cleanup": "bash cleanup-local-images.sh",
+    "cleanup:force": "bash cleanup-local-images.sh --force",
     "deploy:vault": "bash deploy-all.sh --only=vault-service",
     "deploy:apis": "bash deploy-all.sh --only=tools-service,portal-service,lights-service",
     "deploy:gateway": "bash deploy-all.sh --only=prism-service",

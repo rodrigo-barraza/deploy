@@ -21,6 +21,7 @@
 #   npm run deploy -- --dry-run            # validate only
 #   npm run deploy -- --skip-pull          # skip git pull
 #   npm run deploy -- --no-cache           # rebuild images from scratch
+#   npm run deploy -- --changed-only       # only build+deploy services with git changes
 #   npm run deploy -- --only=prism-service,retina-client  # deploy specific services
 #   npm run deploy -- --skip=lupos-bot,lights-service  # skip specific services
 #   npm run deploy -- --no-parallel        # disable parallel builds
@@ -66,15 +67,17 @@ NO_CACHE=false
 NO_PARALLEL=false
 ONLY=""
 SKIP_LIST=""
+CHANGED_ONLY=false
 
 for arg in "$@"; do
   case "$arg" in
-    --dry-run)      DRY_RUN=true ;;
-    --skip-pull)    SKIP_PULL=true ;;
-    --no-cache)     NO_CACHE=true ;;
-    --no-parallel)  NO_PARALLEL=true ;;
-    --only=*)       ONLY="${arg#--only=}" ;;
-    --skip=*)       SKIP_LIST="${arg#--skip=}" ;;
+    --dry-run)        DRY_RUN=true ;;
+    --skip-pull)      SKIP_PULL=true ;;
+    --no-cache)       NO_CACHE=true ;;
+    --no-parallel)    NO_PARALLEL=true ;;
+    --changed-only)   CHANGED_ONLY=true ;;
+    --only=*)         ONLY="${arg#--only=}" ;;
+    --skip=*)         SKIP_LIST="${arg#--skip=}" ;;
   esac
 done
 
@@ -107,6 +110,35 @@ should_deploy() {
   # --skip filter: if set, service must NOT be in the list
   if [ -n "$SKIP_LIST" ]; then
     echo ",$SKIP_LIST," | grep -q ",$svc," && return 1 || return 0
+  fi
+
+  return 0
+}
+
+# ── Change detection ──────────────────────────────────────────
+# Returns 0 (true) if service has changes since last built image
+has_changes() {
+  local svc="$1"
+  local svc_dir="${ROOT_DIR}/${svc}"
+
+  # If --changed-only is not set, always consider changed
+  if ! $CHANGED_ONLY; then
+    return 0
+  fi
+
+  # Get the git SHA baked into the current :latest image label
+  local last_sha
+  last_sha=$(docker inspect --format '{{index .Config.Labels "git.sha"}}' "${svc}:latest" 2>/dev/null || echo "")
+
+  if [ -z "$last_sha" ]; then
+    # No previous image or no label — must build
+    return 0
+  fi
+
+  # Check if there are any changes since that SHA
+  if (cd "$svc_dir" && git diff --quiet "$last_sha" HEAD -- . 2>/dev/null); then
+    # No changes
+    return 1
   fi
 
   return 0
@@ -200,7 +232,12 @@ build_tier() {
   local filtered=()
   for svc in "${services[@]}"; do
     if should_deploy "$svc"; then
-      filtered+=("$svc")
+      if has_changes "$svc"; then
+        filtered+=("$svc")
+      else
+        info "Skipping ${svc} (unchanged since last build)"
+        echo "SKIP" > "${LOG_DIR}/${svc}.build.status"
+      fi
     else
       info "Skipping ${svc} (filtered)"
       echo "SKIP" > "${LOG_DIR}/${svc}.build.status"
@@ -360,6 +397,9 @@ if [ -n "$ONLY" ]; then
 fi
 if [ -n "$SKIP_LIST" ]; then
   echo -e "${CYAN}  Skipping: ${SKIP_LIST}${RESET}"
+fi
+if $CHANGED_ONLY; then
+  echo -e "${CYAN}  Mode: changed-only (skipping unchanged services)${RESET}"
 fi
 echo -e "${MAGENTA}${BOLD}══════════════════════════════════════════════════════════════${RESET}"
 
