@@ -220,9 +220,10 @@ deploy_service() {
   fi
 }
 
-# ── Build a tier (parallel or sequential) ─────────────────────
-# Returns pids and service names for later wait
-build_tier() {
+# ── Fire builds for a tier (non-blocking) ─────────────────────
+# Launches all build jobs as background processes and stores PIDs.
+# Does NOT wait — returns immediately so the next tier can fire too.
+fire_builds() {
   local tier_name="$1"
   shift
   local services=("$@")
@@ -249,9 +250,10 @@ build_tier() {
     return 0
   fi
 
-  step "Building ${tier_name}: ${filtered[*]}"
+  step "Launching builds — ${tier_name}: ${filtered[*]}"
 
-  if $NO_PARALLEL || [ ${#filtered[@]} -eq 1 ]; then
+  if $NO_PARALLEL; then
+    # Sequential mode: run each build inline (blocking)
     for svc in "${filtered[@]}"; do
       build_service "$svc" "false"
       local status
@@ -264,38 +266,66 @@ build_tier() {
       fi
     done
   else
-    local pids=()
+    # Parallel mode: fire all as background jobs
     for svc in "${filtered[@]}"; do
       build_service "$svc" "true" &
-      pids+=("$!:$svc")
+      echo "$!" > "${LOG_DIR}/${svc}.build.pid"
+      info "  ⟶ ${svc} (PID $!)"
     done
+  fi
+}
 
-    # Store pids so deploy phase can wait for them
-    for entry in "${pids[@]}"; do
-      local pid="${entry%%:*}"
-      local svc="${entry##*:}"
-      echo "$pid" > "${LOG_DIR}/${svc}.build.pid"
-    done
+# ── Wait for a tier's builds to finish ────────────────────────
+# Called just before deploying a tier. Collects exit status for
+# each service that was launched in fire_builds.
+wait_builds() {
+  local tier_name="$1"
+  shift
+  local services=("$@")
+  local svc
 
-    # Wait for all builds in this tier
-    local any_failed=false
-    for entry in "${pids[@]}"; do
-      local pid="${entry%%:*}"
-      local svc="${entry##*:}"
-      wait "$pid" || true
-      local status
-      status=$(cat "${LOG_DIR}/${svc}.build.status" 2>/dev/null || echo "UNKNOWN")
-      if [ "$status" = "OK" ]; then
-        ok "${svc} built successfully"
-      else
-        fail "${svc} build failed → ${LOG_DIR}/${svc}.build.log"
-        any_failed=true
-      fi
-    done
+  # In sequential (--no-parallel) mode, builds already completed inline
+  if $NO_PARALLEL; then
+    return 0
+  fi
 
-    if $any_failed; then
-      warn "Some builds in ${tier_name} failed — check logs in ${LOG_DIR}/"
+  local any_waiting=false
+  for svc in "${services[@]}"; do
+    if [ -f "${LOG_DIR}/${svc}.build.pid" ]; then
+      any_waiting=true
+      break
     fi
+  done
+
+  if ! $any_waiting; then
+    return 0
+  fi
+
+  step "Waiting for ${tier_name} builds to finish"
+
+  local any_failed=false
+  for svc in "${services[@]}"; do
+    local pid_file="${LOG_DIR}/${svc}.build.pid"
+    if [ ! -f "$pid_file" ]; then
+      continue
+    fi
+
+    local pid
+    pid=$(cat "$pid_file")
+    wait "$pid" || true
+
+    local status
+    status=$(cat "${LOG_DIR}/${svc}.build.status" 2>/dev/null || echo "UNKNOWN")
+    if [ "$status" = "OK" ]; then
+      ok "${svc} built successfully"
+    else
+      fail "${svc} build failed → ${LOG_DIR}/${svc}.build.log"
+      any_failed=true
+    fi
+  done
+
+  if $any_failed; then
+    warn "Some builds in ${tier_name} failed — check logs in ${LOG_DIR}/"
   fi
 }
 
@@ -305,6 +335,9 @@ deploy_tier() {
   shift
   local services=("$@")
   local svc
+
+  # Wait for this tier's builds before attempting deploy
+  wait_builds "$tier_name" "${services[@]}"
 
   # Filter to only services we should deploy
   local filtered=()
@@ -427,7 +460,7 @@ if [ ${#MISSING[@]} -gt 0 ]; then
 fi
 
 # ══════════════════════════════════════════════════════════════
-# PHASE 1 — BUILD ALL
+# PHASE 1 — BUILD ALL (fire all tiers simultaneously)
 # ══════════════════════════════════════════════════════════════
 echo ""
 echo -e "${CYAN}${BOLD}┌──────────────────────────────────────────────────────────┐${RESET}"
@@ -435,29 +468,19 @@ echo -e "${CYAN}${BOLD}│  PHASE 1 — BUILD                                   
 echo -e "${CYAN}${BOLD}│  All services build in parallel across all tiers         │${RESET}"
 echo -e "${CYAN}${BOLD}└──────────────────────────────────────────────────────────┘${RESET}"
 
-BUILD_START=$SECONDS
 
-build_tier "Tier 0 — Foundation" "${TIER_0[@]}"
-build_tier "Tier 1 — APIs & Services" "${TIER_1[@]}"
-build_tier "Tier 2 — Clients & Bots" "${TIER_2[@]}"
+# Fire all builds at once — no waiting between tiers
+fire_builds "Tier 0 — Foundation" "${TIER_0[@]}"
+fire_builds "Tier 1 — APIs & Services" "${TIER_1[@]}"
+fire_builds "Tier 2 — Clients & Bots" "${TIER_2[@]}"
 
-BUILD_TOTAL=$((SECONDS - BUILD_START))
-echo ""
-ok "All builds completed in ${BUILD_TOTAL}s"
-
-# ── Check for Tier 0 build failure (fatal) ────────────────────
-for svc in "${TIER_0[@]}"; do
-  if should_deploy "$svc"; then
-    local_status=$(cat "${LOG_DIR}/${svc}.build.status" 2>/dev/null || echo "SKIP")
-    if [ "$local_status" = "FAIL" ]; then
-      fail "Tier 0 (${svc}) build failed — aborting deployment"
-      exit 1
-    fi
-  fi
-done
+if ! $NO_PARALLEL; then
+  echo ""
+  info "All builds launched — waiting will happen per-tier before deploy"
+fi
 
 # ══════════════════════════════════════════════════════════════
-# PHASE 2 — DEPLOY IN ORDER
+# PHASE 2 — WAIT & DEPLOY IN ORDER
 # ══════════════════════════════════════════════════════════════
 echo ""
 echo -e "${GREEN}${BOLD}┌──────────────────────────────────────────────────────────┐${RESET}"
@@ -465,7 +488,6 @@ echo -e "${GREEN}${BOLD}│  PHASE 2 — DEPLOY                                 
 echo -e "${GREEN}${BOLD}│  Transfer & restart tier-by-tier in dependency order     │${RESET}"
 echo -e "${GREEN}${BOLD}└──────────────────────────────────────────────────────────┘${RESET}"
 
-DEPLOY_PHASE_START=$SECONDS
 
 header "━━━ TIER 0 — Foundation ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 if ! deploy_tier "Tier 0 — Foundation" "${TIER_0[@]}"; then
@@ -479,7 +501,6 @@ deploy_tier "Tier 1 — APIs & Services" "${TIER_1[@]}"
 header "━━━ TIER 2 — Clients & Bots ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 deploy_tier "Tier 2 — Clients & Bots" "${TIER_2[@]}"
 
-DEPLOY_PHASE_TOTAL=$((SECONDS - DEPLOY_PHASE_START))
 
 # ── Summary ───────────────────────────────────────────────────
 TOTAL=$((SECONDS - DEPLOY_START))
@@ -504,7 +525,7 @@ done
 
 echo ""
 echo -e "  ${GREEN}${PASS} passed${RESET}  ${RED}${FAILED} failed${RESET}  ${DIM}${SKIPPED} skipped${RESET}"
-echo -e "  ${DIM}Build: ${BUILD_TOTAL}s  Deploy: ${DEPLOY_PHASE_TOTAL}s  Total: ${TOTAL}s${RESET}"
+echo -e "  ${DIM}Total: ${TOTAL}s${RESET}"
 echo ""
 echo -e "${MAGENTA}${BOLD}══════════════════════════════════════════════════════════════${RESET}"
 
