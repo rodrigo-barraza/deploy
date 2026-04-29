@@ -19,6 +19,8 @@
     "deploy:portal-client": "bash ../portal-client/deploy.sh",
     "deploy:rod-dev-client": "bash ../rod-dev-client/deploy.sh",
     "deploy:clock-crew-service": "bash ../clock-crew-service/deploy.sh",
-    "deploy:clock-crew-client": "bash ../clock-crew-client/deploy.sh"
+    "deploy:clock-crew-client": "bash ../clock-crew-client/deploy.sh",
+    "deploy:messages-service": "bash ../messages-service/deploy.sh",
+    "deploy:messages-client": "bash ../messages-client/deploy.sh"
   }
 }
