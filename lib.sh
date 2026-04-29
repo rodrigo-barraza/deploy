@@ -17,6 +17,11 @@
 #   EXTRA_SSH_SYNC()   — sync extra files during SSH deploy
 #   EXTRA_SMB_SYNC()   — sync extra files during SMB fallback
 #
+# Modes:
+#   (default)          — full pipeline: validate → pull → build → deploy
+#   --build-only       — validate → pull → build (no deploy)
+#   --deploy-only      — deploy only (skip validate/pull/build)
+#
 # Usage:
 #   npm run deploy              # full deploy
 #   npm run deploy -- --dry-run # validate without deploying
@@ -50,12 +55,16 @@ DOCKER_BIN="/usr/local/bin/docker"                    # Synology docker path
 DRY_RUN=false
 SKIP_PULL=false
 NO_CACHE=""
+BUILD_ONLY=false
+DEPLOY_ONLY=false
 
 for arg in "$@"; do
   case "$arg" in
-    --dry-run)    DRY_RUN=true ;;
-    --skip-pull)  SKIP_PULL=true ;;
-    --no-cache)   NO_CACHE="--no-cache" ;;
+    --dry-run)      DRY_RUN=true ;;
+    --skip-pull)    SKIP_PULL=true ;;
+    --no-cache)     NO_CACHE="--no-cache" ;;
+    --build-only)   BUILD_ONLY=true ;;
+    --deploy-only)  DEPLOY_ONLY=true ;;
   esac
 done
 
@@ -80,35 +89,122 @@ DEPLOY_START=$SECONDS
 # ── Header ────────────────────────────────────────────────────
 echo ""
 echo -e "${CYAN}${BOLD}══════════════════════════════════════════════════════${RESET}"
-echo -e "${CYAN}${BOLD}  ${DISPLAY_NAME} — Deploy to Synology${RESET}"
+if $BUILD_ONLY; then
+  echo -e "${CYAN}${BOLD}  ${DISPLAY_NAME} — Build${RESET}"
+elif $DEPLOY_ONLY; then
+  echo -e "${CYAN}${BOLD}  ${DISPLAY_NAME} — Deploy to Synology${RESET}"
+else
+  echo -e "${CYAN}${BOLD}  ${DISPLAY_NAME} — Build & Deploy to Synology${RESET}"
+fi
 if $DRY_RUN; then
   echo -e "${YELLOW}${BOLD}  ⚠  DRY RUN — no changes will be made${RESET}"
 fi
 echo -e "${CYAN}${BOLD}══════════════════════════════════════════════════════${RESET}"
 
-# ── Validate required files ──────────────────────────────────
-step "Validating deployment files"
+# ══════════════════════════════════════════════════════════════
+# BUILD PHASE (validate → pull → build)
+# Runs for: default mode and --build-only
+# ══════════════════════════════════════════════════════════════
+if ! $DEPLOY_ONLY; then
 
-DEPLOY_ENV="${SCRIPT_DIR}/.env.deploy"
-if [ "$SKIP_ENV_DEPLOY" != "true" ]; then
-  if [ ! -f "$DEPLOY_ENV" ]; then
-    fail ".env.deploy not found at ${DEPLOY_ENV} — create it with runtime env vars (VAULT_SERVICE_URL, VAULT_SERVICE_TOKEN, etc.)"
+  # ── Validate required files ──────────────────────────────────
+  step "Validating deployment files"
+
+  DEPLOY_ENV="${SCRIPT_DIR}/.env.deploy"
+  if [ "$SKIP_ENV_DEPLOY" != "true" ]; then
+    if [ ! -f "$DEPLOY_ENV" ]; then
+      fail ".env.deploy not found at ${DEPLOY_ENV} — create it with runtime env vars (VAULT_SERVICE_URL, VAULT_SERVICE_TOKEN, etc.)"
+    fi
+    ok ".env.deploy found ($(wc -l < "$DEPLOY_ENV") lines)"
   fi
-  ok ".env.deploy found ($(wc -l < "$DEPLOY_ENV") lines)"
+
+  # Call optional extra validation hook
+  if type EXTRA_VALIDATE &>/dev/null; then
+    EXTRA_VALIDATE
+  fi
+
+  # ── Git info ──────────────────────────────────────────────────
+  cd "$SCRIPT_DIR"
+  GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+  GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+  BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  info "Branch: ${GIT_BRANCH} @ ${GIT_SHA}"
+  info "Time:   ${BUILD_TIME}"
+
+  # ── 1. Pull latest ──────────────────────────────────────────
+  if ! $SKIP_PULL; then
+    step "Pulling latest changes"
+    if $DRY_RUN; then
+      info "(skipped — dry run)"
+    else
+      git pull --ff-only 2>&1 | sed 's/^/  /'
+      GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+      ok "Now at ${GIT_SHA}"
+    fi
+  else
+    info "Skipping git pull (--skip-pull)"
+  fi
+
+  # ── 2. Build image ──────────────────────────────────────────
+  TAG_LATEST="${IMAGE_NAME}:latest"
+  TAG_SHA="${IMAGE_NAME}:${GIT_SHA}"
+
+  # Call optional pre-build hook (sets BUILD_ARGS, etc.)
+  if type PRE_BUILD &>/dev/null; then
+    PRE_BUILD
+  fi
+
+  step "Building Docker image"
+  info "Tags: ${TAG_LATEST}, ${TAG_SHA}"
+
+  if $DRY_RUN; then
+    info "(skipped — dry run)"
+  else
+    BUILD_START_INNER=$SECONDS
+    docker build \
+      $NO_CACHE \
+      $BUILD_EXTRA_FLAGS \
+      $BUILD_ARGS \
+      --label "git.sha=${GIT_SHA}" \
+      --label "git.branch=${GIT_BRANCH}" \
+      --label "build.time=${BUILD_TIME}" \
+      -t "$TAG_LATEST" \
+      -t "$TAG_SHA" \
+      . 2>&1 | tail -${BUILD_TAIL_LINES} | sed 's/^/  /'
+    ok "Built in $((SECONDS - BUILD_START_INNER))s"
+  fi
+
+  # ── If build-only, stop here ─────────────────────────────────
+  if $BUILD_ONLY; then
+    TOTAL=$((SECONDS - DEPLOY_START))
+    echo ""
+    echo -e "${GREEN}${BOLD}══════════════════════════════════════════════════════${RESET}"
+    echo -e "${GREEN}${BOLD}  ✅ Build complete in ${TOTAL}s${RESET}"
+    cd "$SCRIPT_DIR"
+    GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+    GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+    BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+    echo -e "${DIM}  ${GIT_BRANCH}@${GIT_SHA} (${BUILD_TIME})${RESET}"
+    echo -e "${GREEN}${BOLD}══════════════════════════════════════════════════════${RESET}"
+    echo ""
+    exit 0
+  fi
 fi
 
-# Call optional extra validation hook
-if type EXTRA_VALIDATE &>/dev/null; then
-  EXTRA_VALIDATE
-fi
+# ══════════════════════════════════════════════════════════════
+# DEPLOY PHASE (SSH/SMB transfer + restart)
+# Runs for: default mode and --deploy-only
+# ══════════════════════════════════════════════════════════════
 
-# ── Git info ──────────────────────────────────────────────────
-cd "$SCRIPT_DIR"
-GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
-BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-info "Branch: ${GIT_BRANCH} @ ${GIT_SHA}"
-info "Time:   ${BUILD_TIME}"
+# When deploy-only, we need git info for the summary but skip the build
+if $DEPLOY_ONLY; then
+  cd "$SCRIPT_DIR"
+  GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+  GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
+  BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+  TAG_LATEST="${IMAGE_NAME}:latest"
+  DEPLOY_ENV="${SCRIPT_DIR}/.env.deploy"
+fi
 
 # ── Detect SSH access (retry with jittered backoff for parallel tiers) ──
 HAS_SSH=false
@@ -127,49 +223,6 @@ for _ssh_attempt in 1 2; do
 done
 if ! $HAS_SSH; then
   warn "SSH to '${NAS_HOST}' unavailable after 2 attempts — will fall back to SMB export"
-fi
-
-# ── 1. Pull latest ────────────────────────────────────────────
-if ! $SKIP_PULL; then
-  step "Pulling latest changes"
-  if $DRY_RUN; then
-    info "(skipped — dry run)"
-  else
-    git pull --ff-only 2>&1 | sed 's/^/  /'
-    GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-    ok "Now at ${GIT_SHA}"
-  fi
-else
-  info "Skipping git pull (--skip-pull)"
-fi
-
-# ── 2. Build image ────────────────────────────────────────────
-TAG_LATEST="${IMAGE_NAME}:latest"
-TAG_SHA="${IMAGE_NAME}:${GIT_SHA}"
-
-# Call optional pre-build hook (sets BUILD_ARGS, etc.)
-if type PRE_BUILD &>/dev/null; then
-  PRE_BUILD
-fi
-
-step "Building Docker image"
-info "Tags: ${TAG_LATEST}, ${TAG_SHA}"
-
-if $DRY_RUN; then
-  info "(skipped — dry run)"
-else
-  BUILD_START=$SECONDS
-  docker build \
-    $NO_CACHE \
-    $BUILD_EXTRA_FLAGS \
-    $BUILD_ARGS \
-    --label "git.sha=${GIT_SHA}" \
-    --label "git.branch=${GIT_BRANCH}" \
-    --label "build.time=${BUILD_TIME}" \
-    -t "$TAG_LATEST" \
-    -t "$TAG_SHA" \
-    . 2>&1 | tail -${BUILD_TAIL_LINES} | sed 's/^/  /'
-  ok "Built in $((SECONDS - BUILD_START))s"
 fi
 
 # ── 3. Deploy ─────────────────────────────────────────────────
@@ -277,7 +330,11 @@ fi
 TOTAL=$((SECONDS - DEPLOY_START))
 echo ""
 echo -e "${GREEN}${BOLD}══════════════════════════════════════════════════════${RESET}"
-echo -e "${GREEN}${BOLD}  ✅ Deploy complete in ${TOTAL}s${RESET}"
+if $DEPLOY_ONLY; then
+  echo -e "${GREEN}${BOLD}  ✅ Deploy complete in ${TOTAL}s${RESET}"
+else
+  echo -e "${GREEN}${BOLD}  ✅ Build & deploy complete in ${TOTAL}s${RESET}"
+fi
 echo -e "${DIM}  ${GIT_BRANCH}@${GIT_SHA} → ${NAS_HOST} (${BUILD_TIME})${RESET}"
 echo -e "${GREEN}${BOLD}══════════════════════════════════════════════════════${RESET}"
 echo ""

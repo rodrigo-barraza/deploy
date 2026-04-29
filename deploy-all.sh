@@ -2,10 +2,16 @@
 # ============================================================
 # Sun — Deploy All Services
 #
-# Orchestrates `npm run deploy` across all services with
-# proper dependency ordering and parallelism.
+# Two-phase pipeline:
+#   Phase 1 — BUILD: all services build in parallel (or sequential
+#             with --no-parallel). Builds across ALL tiers start
+#             simultaneously so total build time ≈ slowest build.
+#   Phase 2 — DEPLOY: services deploy tier-by-tier in order.
+#             Each tier waits only for its own builds to finish
+#             before deploying (earlier tiers may deploy while
+#             later tiers are still building).
 #
-# Tiers (sequential between tiers, parallel within):
+# Tiers (sequential between tiers for deploy, parallel builds):
 #   0. Foundation   — vault-service (secret store, must be up first)
 #   1. APIs         — prism-service, tools-service, portal-service, lights-service, clock-crew-service
 #   2. Clients/Bots — retina-client, portal-client, rod-dev-client, lupos-bot, clock-crew-client
@@ -50,6 +56,7 @@ declare -A SVC_COLORS=(
   [clock-crew-client]="\033[96m"      # bright cyan
   [messages-service]="\033[92m"        # bright green
   [messages-client]="\033[33;1m"       # bold yellow
+  [lights-client]="\033[32;1m"         # bold green
 )
 
 # ── Flags ─────────────────────────────────────────────────────
@@ -114,48 +121,79 @@ build_flags() {
   echo "$flags"
 }
 
-# ── Deploy a single service (streams output live) ─────────────
-deploy_service() {
+# ── Build a single service ────────────────────────────────────
+# Runs the per-service deploy.sh with --build-only, which performs:
+#   validate → git pull → docker build (no SSH/SMB deploy)
+build_service() {
   local svc="$1"
   local prefix="$2"   # "true" to prefix lines with service name
   local svc_dir="${ROOT_DIR}/${svc}"
-  local log_file="${LOG_DIR}/${svc}.log"
+  local log_file="${LOG_DIR}/${svc}.build.log"
   local flags
   flags=$(build_flags)
 
   if [ ! -f "${svc_dir}/deploy.sh" ]; then
     fail "${svc}: no deploy.sh found — skipping"
-    echo "SKIP" > "${LOG_DIR}/${svc}.status"
+    echo "SKIP" > "${LOG_DIR}/${svc}.build.status"
     return 0
   fi
 
   local color="${SVC_COLORS[$svc]:-$DIM}"
   local pad_svc
-  # Pad service name to 10 chars for aligned output
-  pad_svc=$(printf '%-10s' "$svc")
+  pad_svc=$(printf '%-20s' "$svc")
 
   if [ "$prefix" = "true" ]; then
-    # Stream live with service-name prefix + tee to log
-    bash "${svc_dir}/deploy.sh" $flags 2>&1 \
+    bash "${svc_dir}/deploy.sh" --build-only $flags 2>&1 \
       | tee "$log_file" \
       | sed -u "s/^/${color}${BOLD}[${pad_svc}]${RESET} /" \
-      && echo "OK" > "${LOG_DIR}/${svc}.status" \
-      || echo "FAIL" > "${LOG_DIR}/${svc}.status"
+      && echo "OK" > "${LOG_DIR}/${svc}.build.status" \
+      || echo "FAIL" > "${LOG_DIR}/${svc}.build.status"
   else
-    # Stream live without prefix (single service) + tee to log
-    bash "${svc_dir}/deploy.sh" $flags 2>&1 \
+    bash "${svc_dir}/deploy.sh" --build-only $flags 2>&1 \
       | tee "$log_file" \
-      && echo "OK" > "${LOG_DIR}/${svc}.status" \
-      || echo "FAIL" > "${LOG_DIR}/${svc}.status"
+      && echo "OK" > "${LOG_DIR}/${svc}.build.status" \
+      || echo "FAIL" > "${LOG_DIR}/${svc}.build.status"
   fi
 }
 
-# ── Deploy a tier (parallel or sequential) ────────────────────
-deploy_tier() {
+# ── Deploy a single service (transfer + restart only) ─────────
+deploy_service() {
+  local svc="$1"
+  local prefix="$2"
+  local svc_dir="${ROOT_DIR}/${svc}"
+  local log_file="${LOG_DIR}/${svc}.deploy.log"
+  local flags
+  flags=$(build_flags)
+
+  if [ ! -f "${svc_dir}/deploy.sh" ]; then
+    echo "SKIP" > "${LOG_DIR}/${svc}.deploy.status"
+    return 0
+  fi
+
+  local color="${SVC_COLORS[$svc]:-$DIM}"
+  local pad_svc
+  pad_svc=$(printf '%-20s' "$svc")
+
+  if [ "$prefix" = "true" ]; then
+    bash "${svc_dir}/deploy.sh" --deploy-only $flags 2>&1 \
+      | tee "$log_file" \
+      | sed -u "s/^/${color}${BOLD}[${pad_svc}]${RESET} /" \
+      && echo "OK" > "${LOG_DIR}/${svc}.deploy.status" \
+      || echo "FAIL" > "${LOG_DIR}/${svc}.deploy.status"
+  else
+    bash "${svc_dir}/deploy.sh" --deploy-only $flags 2>&1 \
+      | tee "$log_file" \
+      && echo "OK" > "${LOG_DIR}/${svc}.deploy.status" \
+      || echo "FAIL" > "${LOG_DIR}/${svc}.deploy.status"
+  fi
+}
+
+# ── Build a tier (parallel or sequential) ─────────────────────
+# Returns pids and service names for later wait
+build_tier() {
   local tier_name="$1"
   shift
   local services=("$@")
-  local pids=()
   local svc
 
   # Filter to only services we should deploy
@@ -165,28 +203,110 @@ deploy_tier() {
       filtered+=("$svc")
     else
       info "Skipping ${svc} (filtered)"
-      echo "SKIP" > "${LOG_DIR}/${svc}.status"
+      echo "SKIP" > "${LOG_DIR}/${svc}.build.status"
     fi
   done
 
   if [ ${#filtered[@]} -eq 0 ]; then
-    info "No services to deploy in this tier"
+    info "No services to build in ${tier_name}"
+    return 0
+  fi
+
+  step "Building ${tier_name}: ${filtered[*]}"
+
+  if $NO_PARALLEL || [ ${#filtered[@]} -eq 1 ]; then
+    for svc in "${filtered[@]}"; do
+      build_service "$svc" "false"
+      local status
+      status=$(cat "${LOG_DIR}/${svc}.build.status" 2>/dev/null || echo "UNKNOWN")
+      if [ "$status" = "OK" ]; then
+        ok "${svc} built successfully"
+      elif [ "$status" = "FAIL" ]; then
+        fail "${svc} build failed"
+        info "Log: ${LOG_DIR}/${svc}.build.log"
+      fi
+    done
+  else
+    local pids=()
+    for svc in "${filtered[@]}"; do
+      build_service "$svc" "true" &
+      pids+=("$!:$svc")
+    done
+
+    # Store pids so deploy phase can wait for them
+    for entry in "${pids[@]}"; do
+      local pid="${entry%%:*}"
+      local svc="${entry##*:}"
+      echo "$pid" > "${LOG_DIR}/${svc}.build.pid"
+    done
+
+    # Wait for all builds in this tier
+    local any_failed=false
+    for entry in "${pids[@]}"; do
+      local pid="${entry%%:*}"
+      local svc="${entry##*:}"
+      wait "$pid" || true
+      local status
+      status=$(cat "${LOG_DIR}/${svc}.build.status" 2>/dev/null || echo "UNKNOWN")
+      if [ "$status" = "OK" ]; then
+        ok "${svc} built successfully"
+      else
+        fail "${svc} build failed → ${LOG_DIR}/${svc}.build.log"
+        any_failed=true
+      fi
+    done
+
+    if $any_failed; then
+      warn "Some builds in ${tier_name} failed — check logs in ${LOG_DIR}/"
+    fi
+  fi
+}
+
+# ── Deploy a tier (sequential — respect tier ordering) ────────
+deploy_tier() {
+  local tier_name="$1"
+  shift
+  local services=("$@")
+  local svc
+
+  # Filter to only services we should deploy
+  local filtered=()
+  for svc in "${services[@]}"; do
+    if should_deploy "$svc"; then
+      # Only deploy if build succeeded
+      local build_status
+      build_status=$(cat "${LOG_DIR}/${svc}.build.status" 2>/dev/null || echo "SKIP")
+      if [ "$build_status" = "OK" ]; then
+        filtered+=("$svc")
+      elif [ "$build_status" = "FAIL" ]; then
+        fail "${svc}: build failed — skipping deploy"
+        echo "FAIL" > "${LOG_DIR}/${svc}.deploy.status"
+      else
+        echo "SKIP" > "${LOG_DIR}/${svc}.deploy.status"
+      fi
+    else
+      echo "SKIP" > "${LOG_DIR}/${svc}.deploy.status"
+    fi
+  done
+
+  if [ ${#filtered[@]} -eq 0 ]; then
+    info "No services to deploy in ${tier_name}"
     return 0
   fi
 
   step "Deploying ${tier_name}: ${filtered[*]}"
 
   if $NO_PARALLEL || [ ${#filtered[@]} -eq 1 ]; then
-    # Sequential — stream directly, no prefix needed
+    # Sequential deploy
     for svc in "${filtered[@]}"; do
       deploy_service "$svc" "false"
       local status
-      status=$(cat "${LOG_DIR}/${svc}.status" 2>/dev/null || echo "UNKNOWN")
+      status=$(cat "${LOG_DIR}/${svc}.deploy.status" 2>/dev/null || echo "UNKNOWN")
       if [ "$status" = "OK" ]; then
         ok "${svc} deployed successfully"
       elif [ "$status" = "FAIL" ]; then
         fail "${svc} deployment failed"
-        info "Log: ${LOG_DIR}/${svc}.log"
+        info "Log: ${LOG_DIR}/${svc}.deploy.log"
 
         # Tier 0 failure is fatal — vault must succeed
         if [ "$tier_name" = "Tier 0 — Foundation" ]; then
@@ -196,30 +316,30 @@ deploy_tier() {
       fi
     done
   else
-    # Parallel — stream with service-name prefixes
+    # Parallel deploy within tier
+    local pids=()
     for svc in "${filtered[@]}"; do
       deploy_service "$svc" "true" &
       pids+=("$!:$svc")
     done
 
-    # Wait for all background jobs
     local any_failed=false
     for entry in "${pids[@]}"; do
       local pid="${entry%%:*}"
       local svc="${entry##*:}"
       wait "$pid" || true
       local status
-      status=$(cat "${LOG_DIR}/${svc}.status" 2>/dev/null || echo "UNKNOWN")
+      status=$(cat "${LOG_DIR}/${svc}.deploy.status" 2>/dev/null || echo "UNKNOWN")
       if [ "$status" = "OK" ]; then
         ok "${svc} deployed successfully"
       else
-        fail "${svc} deployment failed → ${LOG_DIR}/${svc}.log"
+        fail "${svc} deployment failed → ${LOG_DIR}/${svc}.deploy.log"
         any_failed=true
       fi
     done
 
     if $any_failed; then
-      warn "Some services in this tier failed — check logs in ${LOG_DIR}/"
+      warn "Some deploys in ${tier_name} failed — check logs in ${LOG_DIR}/"
     fi
   fi
 }
@@ -231,6 +351,7 @@ DEPLOY_START=$SECONDS
 echo ""
 echo -e "${MAGENTA}${BOLD}══════════════════════════════════════════════════════════════${RESET}"
 echo -e "${MAGENTA}${BOLD}  ☀️  Sun — Deploy All Services${RESET}"
+echo -e "${DIM}  Two-phase pipeline: build all → deploy in order${RESET}"
 if $DRY_RUN; then
   echo -e "${YELLOW}${BOLD}  ⚠  DRY RUN — no changes will be made${RESET}"
 fi
@@ -244,7 +365,7 @@ echo -e "${MAGENTA}${BOLD}══════════════════
 
 # ── Prepare log directory ─────────────────────────────────────
 mkdir -p "$LOG_DIR"
-rm -f "${LOG_DIR}"/*.log "${LOG_DIR}"/*.status 2>/dev/null
+rm -f "${LOG_DIR}"/*.log "${LOG_DIR}"/*.status "${LOG_DIR}"/*.pid 2>/dev/null
 
 # ── Validate all services have deploy.sh ──────────────────────
 step "Pre-flight check"
@@ -265,7 +386,46 @@ if [ ${#MISSING[@]} -gt 0 ]; then
   warn "These services will be skipped"
 fi
 
-# ── Deploy tiers sequentially ─────────────────────────────────
+# ══════════════════════════════════════════════════════════════
+# PHASE 1 — BUILD ALL
+# ══════════════════════════════════════════════════════════════
+echo ""
+echo -e "${CYAN}${BOLD}┌──────────────────────────────────────────────────────────┐${RESET}"
+echo -e "${CYAN}${BOLD}│  PHASE 1 — BUILD                                        │${RESET}"
+echo -e "${CYAN}${BOLD}│  All services build in parallel across all tiers         │${RESET}"
+echo -e "${CYAN}${BOLD}└──────────────────────────────────────────────────────────┘${RESET}"
+
+BUILD_START=$SECONDS
+
+build_tier "Tier 0 — Foundation" "${TIER_0[@]}"
+build_tier "Tier 1 — APIs & Services" "${TIER_1[@]}"
+build_tier "Tier 2 — Clients & Bots" "${TIER_2[@]}"
+
+BUILD_TOTAL=$((SECONDS - BUILD_START))
+echo ""
+ok "All builds completed in ${BUILD_TOTAL}s"
+
+# ── Check for Tier 0 build failure (fatal) ────────────────────
+for svc in "${TIER_0[@]}"; do
+  if should_deploy "$svc"; then
+    local_status=$(cat "${LOG_DIR}/${svc}.build.status" 2>/dev/null || echo "SKIP")
+    if [ "$local_status" = "FAIL" ]; then
+      fail "Tier 0 (${svc}) build failed — aborting deployment"
+      exit 1
+    fi
+  fi
+done
+
+# ══════════════════════════════════════════════════════════════
+# PHASE 2 — DEPLOY IN ORDER
+# ══════════════════════════════════════════════════════════════
+echo ""
+echo -e "${GREEN}${BOLD}┌──────────────────────────────────────────────────────────┐${RESET}"
+echo -e "${GREEN}${BOLD}│  PHASE 2 — DEPLOY                                       │${RESET}"
+echo -e "${GREEN}${BOLD}│  Transfer & restart tier-by-tier in dependency order     │${RESET}"
+echo -e "${GREEN}${BOLD}└──────────────────────────────────────────────────────────┘${RESET}"
+
+DEPLOY_PHASE_START=$SECONDS
 
 header "━━━ TIER 0 — Foundation ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 if ! deploy_tier "Tier 0 — Foundation" "${TIER_0[@]}"; then
@@ -278,6 +438,8 @@ deploy_tier "Tier 1 — APIs & Services" "${TIER_1[@]}"
 
 header "━━━ TIER 2 — Clients & Bots ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 deploy_tier "Tier 2 — Clients & Bots" "${TIER_2[@]}"
+
+DEPLOY_PHASE_TOTAL=$((SECONDS - DEPLOY_PHASE_START))
 
 # ── Summary ───────────────────────────────────────────────────
 TOTAL=$((SECONDS - DEPLOY_START))
@@ -292,16 +454,17 @@ FAILED=0
 SKIPPED=0
 
 for svc in "${ALL_SERVICES[@]}"; do
-  local_status=$(cat "${LOG_DIR}/${svc}.status" 2>/dev/null || echo "SKIP")
+  local_status=$(cat "${LOG_DIR}/${svc}.deploy.status" 2>/dev/null || echo "SKIP")
   case "$local_status" in
     OK)   echo -e "  ${GREEN}✔ ${svc}${RESET}"; PASS=$((PASS + 1)) ;;
-    FAIL) echo -e "  ${RED}✖ ${svc}${RESET}  →  ${LOG_DIR}/${svc}.log"; FAILED=$((FAILED + 1)) ;;
+    FAIL) echo -e "  ${RED}✖ ${svc}${RESET}  →  ${LOG_DIR}/${svc}.deploy.log"; FAILED=$((FAILED + 1)) ;;
     *)    echo -e "  ${DIM}⊘ ${svc} (skipped)${RESET}"; SKIPPED=$((SKIPPED + 1)) ;;
   esac
 done
 
 echo ""
-echo -e "  ${GREEN}${PASS} passed${RESET}  ${RED}${FAILED} failed${RESET}  ${DIM}${SKIPPED} skipped${RESET}  ⏱ ${TOTAL}s"
+echo -e "  ${GREEN}${PASS} passed${RESET}  ${RED}${FAILED} failed${RESET}  ${DIM}${SKIPPED} skipped${RESET}"
+echo -e "  ${DIM}Build: ${BUILD_TOTAL}s  Deploy: ${DEPLOY_PHASE_TOTAL}s  Total: ${TOTAL}s${RESET}"
 echo ""
 echo -e "${MAGENTA}${BOLD}══════════════════════════════════════════════════════════════${RESET}"
 
