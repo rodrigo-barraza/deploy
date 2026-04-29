@@ -36,7 +36,7 @@ LOG_DIR="${SCRIPT_DIR}/.deploy-logs"
 # Deployment tiers — sequential between tiers, parallel within
 TIER_0=(vault-service)
 TIER_1=(prism-service tools-service portal-service lights-service clock-crew-service messages-service)
-TIER_2=(retina-client portal-client rod-dev-client lupos-bot clock-crew-client messages-client)
+TIER_2=(retina-client portal-client rod-dev-client lupos-bot clock-crew-client messages-client lights-client)
 
 ALL_SERVICES=("${TIER_0[@]}" "${TIER_1[@]}" "${TIER_2[@]}")
 
