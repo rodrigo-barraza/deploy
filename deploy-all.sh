@@ -153,52 +153,26 @@ build_flags() {
   echo "$flags"
 }
 
-# ── Build a single service ────────────────────────────────────
-# Runs the per-service deploy.sh with --build-only, which performs:
-#   validate → git pull → docker build (no SSH/SMB deploy)
-build_service() {
-  local svc="$1"
-  local prefix="$2"   # "true" to prefix lines with service name
-  local svc_dir="${ROOT_DIR}/${svc}"
-  local log_file="${LOG_DIR}/${svc}.build.log"
-  local flags
-  flags=$(build_flags)
-
-  if [ ! -f "${svc_dir}/deploy.sh" ]; then
-    fail "${svc}: no deploy.sh found — skipping"
-    echo "SKIP" > "${LOG_DIR}/${svc}.build.status"
-    return 0
-  fi
-
-  local color="${SVC_COLORS[$svc]:-$DIM}"
-  local pad_svc
-  pad_svc=$(printf '%-20s' "$svc")
-
-  if [ "$prefix" = "true" ]; then
-    bash "${svc_dir}/deploy.sh" --build-only $flags 2>&1 \
-      | tee "$log_file" \
-      | sed -u "s/^/${color}${BOLD}[${pad_svc}]${RESET} /" \
-      && echo "OK" > "${LOG_DIR}/${svc}.build.status" \
-      || echo "FAIL" > "${LOG_DIR}/${svc}.build.status"
-  else
-    bash "${svc_dir}/deploy.sh" --build-only $flags 2>&1 \
-      | tee "$log_file" \
-      && echo "OK" > "${LOG_DIR}/${svc}.build.status" \
-      || echo "FAIL" > "${LOG_DIR}/${svc}.build.status"
-  fi
-}
-
-# ── Deploy a single service (transfer + restart only) ─────────
-deploy_service() {
+# ── Run a phase (build or deploy) for a single service ────────
+# Generic runner — accepts the phase name and deploy.sh flag.
+#   $1  svc         service directory name
+#   $2  prefix      "true" to prefix output with colored service name
+#   $3  phase       "build" | "deploy" (used for log/status filenames)
+#   $4  phase_flag  "--build-only" | "--deploy-only"
+run_phase() {
   local svc="$1"
   local prefix="$2"
+  local phase="$3"
+  local phase_flag="$4"
   local svc_dir="${ROOT_DIR}/${svc}"
-  local log_file="${LOG_DIR}/${svc}.deploy.log"
+  local log_file="${LOG_DIR}/${svc}.${phase}.log"
+  local status_file="${LOG_DIR}/${svc}.${phase}.status"
   local flags
   flags=$(build_flags)
 
   if [ ! -f "${svc_dir}/deploy.sh" ]; then
-    echo "SKIP" > "${LOG_DIR}/${svc}.deploy.status"
+    [ "$phase" = "build" ] && fail "${svc}: no deploy.sh found — skipping"
+    echo "SKIP" > "$status_file"
     return 0
   fi
 
@@ -207,18 +181,21 @@ deploy_service() {
   pad_svc=$(printf '%-20s' "$svc")
 
   if [ "$prefix" = "true" ]; then
-    bash "${svc_dir}/deploy.sh" --deploy-only $flags 2>&1 \
+    bash "${svc_dir}/deploy.sh" ${phase_flag} $flags 2>&1 \
       | tee "$log_file" \
       | sed -u "s/^/${color}${BOLD}[${pad_svc}]${RESET} /" \
-      && echo "OK" > "${LOG_DIR}/${svc}.deploy.status" \
-      || echo "FAIL" > "${LOG_DIR}/${svc}.deploy.status"
+      && echo "OK" > "$status_file" \
+      || echo "FAIL" > "$status_file"
   else
-    bash "${svc_dir}/deploy.sh" --deploy-only $flags 2>&1 \
+    bash "${svc_dir}/deploy.sh" ${phase_flag} $flags 2>&1 \
       | tee "$log_file" \
-      && echo "OK" > "${LOG_DIR}/${svc}.deploy.status" \
-      || echo "FAIL" > "${LOG_DIR}/${svc}.deploy.status"
+      && echo "OK" > "$status_file" \
+      || echo "FAIL" > "$status_file"
   fi
 }
+
+build_service()  { run_phase "$1" "$2" "build"  "--build-only";  }
+deploy_service() { run_phase "$1" "$2" "deploy" "--deploy-only"; }
 
 # ── Fire builds for a tier (non-blocking) ─────────────────────
 # Launches all build jobs as background processes and stores PIDs.
