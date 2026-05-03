@@ -24,6 +24,7 @@
     "deploy:clock-crew-service": "bash ../clock-crew-service/deploy.sh",
     "deploy:clock-crew-client": "bash ../clock-crew-client/deploy.sh",
     "deploy:messages-service": "bash ../messages-service/deploy.sh",
-    "deploy:messages-client": "bash ../messages-client/deploy.sh"
+    "deploy:messages-client": "bash ../messages-client/deploy.sh",
+    "deploy:classic-whitemane-client": "bash ../classic-whitemane-client/deploy.sh"
   }
 }

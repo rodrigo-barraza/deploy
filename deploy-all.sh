@@ -37,7 +37,7 @@ LOG_DIR="${SCRIPT_DIR}/.deploy-logs"
 # Deployment tiers — sequential between tiers, parallel within
 TIER_0=(vault-service)
 TIER_1=(prism-service tools-service portal-service lights-service clock-crew-service messages-service)
-TIER_2=(prism-client portal-client rod-dev-client lupos-bot clock-crew-client messages-client lights-client)
+TIER_2=(prism-client portal-client rod-dev-client lupos-bot clock-crew-client messages-client lights-client classic-whitemane-client)
 
 ALL_SERVICES=("${TIER_0[@]}" "${TIER_1[@]}" "${TIER_2[@]}")
 
@@ -58,6 +58,7 @@ declare -A SVC_COLORS=(
   [messages-service]="\033[92m"        # bright green
   [messages-client]="\033[33;1m"       # bold yellow
   [lights-client]="\033[32;1m"         # bold green
+  [classic-whitemane-client]="\033[34;1m" # bold blue
 )
 
 # ── Flags ─────────────────────────────────────────────────────
