@@ -11,10 +11,11 @@
 #             before deploying (earlier tiers may deploy while
 #             later tiers are still building).
 #
-# Tiers (sequential between tiers for deploy, parallel builds):
-#   0. Foundation   — vault-service (secret store, must be up first)
-#   1. APIs         — prism-service, tools-service, portal-service, lights-service, clock-crew-service
-#   2. Clients/Bots — prism-client, portal-client, rod-dev-client, lupos-bot, clock-crew-client
+# Tiers are auto-derived from vault-service/services.json:
+#   0. Foundation   — secret store (must be up first)
+#   1. APIs         — backend services
+#   2. Mid-tier     — services depending on tier-1
+#   3. Clients/Bots — frontends, dashboards, bots
 #
 # Usage:
 #   npm run deploy                         # full deploy
@@ -33,34 +34,67 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"   # sun/ parent directory
 LOG_DIR="${SCRIPT_DIR}/.deploy-logs"
+SERVICES_JSON="${ROOT_DIR}/vault-service/services.json"
 
-# Deployment tiers — sequential between tiers, parallel within
-TIER_0=(vault-service)
-TIER_1=(prism-service tools-service portal-service lights-service clock-crew-service messages-service)
-TIER_2=(prism-client portal-client rod-dev-client lupos-bot clock-crew-client messages-client lights-client classic-whitemane-client)
+# ── Verify services.json ──────────────────────────────────────
+if [ ! -f "$SERVICES_JSON" ]; then
+  echo "ERROR: services.json not found at ${SERVICES_JSON}" >&2
+  exit 1
+fi
 
-ALL_SERVICES=("${TIER_0[@]}" "${TIER_1[@]}" "${TIER_2[@]}")
+# ── Dynamically load tiers from services.json ─────────────────
+# Uses Node.js (always available) to parse JSON and emit bash-eval
+# assignments: MAX_TIER, TIER_SERVICES[n], TIER_<n> arrays.
+ALL_SERVICES=()
+declare -A TIER_SERVICES  # tier -> space-separated service IDs
 
-# ── Service colors (for prefixed output in parallel mode) ─────
-# Each service gets a unique color so interleaved output is readable
-# Use $'\033' (ANSI-C quoting) so sed receives real ESC bytes, not literal \033
-declare -A SVC_COLORS=(
-  [vault-service]=$'\033[33m'          # yellow
-  [prism-service]=$'\033[36m'          # cyan
-  [tools-service]=$'\033[35m'          # magenta
-  [portal-service]=$'\033[34m'         # blue
-  [lights-service]=$'\033[32m'         # green
-  [clock-crew-service]=$'\033[94m'     # bright blue
-  [lupos-bot]=$'\033[91m'              # bright red
-  [rod-dev-client]=$'\033[93m'         # bright yellow
-  [prism-client]=$'\033[95m'           # bright magenta
-  [portal-client]=$'\033[96m'          # bright cyan
-  [clock-crew-client]=$'\033[96m'      # bright cyan
-  [messages-service]=$'\033[92m'       # bright green
-  [messages-client]=$'\033[33;1m'      # bold yellow
-  [lights-client]=$'\033[32;1m'        # bold green
-  [classic-whitemane-client]=$'\033[34;1m' # bold blue
+eval "$(node -e "
+  const s = require('$SERVICES_JSON');
+  const tiers = {};
+  for (const svc of s.services) {
+    (tiers[svc.deployTier] ??= []).push(svc.id);
+  }
+  const max = Math.max(...Object.keys(tiers).map(Number));
+  console.log('MAX_TIER=' + max);
+  for (let t = 0; t <= max; t++) {
+    const ids = (tiers[t] || []).join(' ');
+    console.log('TIER_SERVICES[' + t + ']=\"' + ids + '\"');
+    console.log('TIER_' + t + '=(' + ids + ')');
+  }
+")"
+
+for s in "${!TIER_SERVICES[@]}"; do
+  for id in ${TIER_SERVICES[$s]}; do
+    ALL_SERVICES+=("$id")
+  done
+done
+
+# ── Service colors (auto-assigned from rotating palette) ──────
+# Each service gets a unique color so interleaved output is readable.
+# Uses ANSI-C quoting ($'\033') so sed receives real ESC bytes.
+COLOR_PALETTE=(
+  $'\033[33m'     # yellow
+  $'\033[36m'     # cyan
+  $'\033[35m'     # magenta
+  $'\033[34m'     # blue
+  $'\033[32m'     # green
+  $'\033[94m'     # bright blue
+  $'\033[91m'     # bright red
+  $'\033[93m'     # bright yellow
+  $'\033[95m'     # bright magenta
+  $'\033[96m'     # bright cyan
+  $'\033[92m'     # bright green
+  $'\033[33;1m'   # bold yellow
+  $'\033[32;1m'   # bold green
+  $'\033[34;1m'   # bold blue
+  $'\033[35;1m'   # bold magenta
+  $'\033[36;1m'   # bold cyan
+  $'\033[31;1m'   # bold red
 )
+declare -A SVC_COLORS
+for i in "${!ALL_SERVICES[@]}"; do
+  SVC_COLORS[${ALL_SERVICES[$i]}]="${COLOR_PALETTE[$((i % ${#COLOR_PALETTE[@]}))]}"
+done
 
 # ── Flags ─────────────────────────────────────────────────────
 DRY_RUN=false
@@ -424,6 +458,13 @@ if [ ${#MISSING[@]} -gt 0 ]; then
   warn "These services will be skipped"
 fi
 
+# ── Tier labels (descriptive names for output) ───────────────
+declare -A TIER_LABELS=(
+  [0]="Tier 0 — Foundation"
+  [1]="Tier 1 — APIs & Services"
+  [2]="Tier 2 — Clients & Bots"
+)
+
 # ══════════════════════════════════════════════════════════════
 # PHASE 1 — BUILD ALL (fire all tiers simultaneously)
 # ══════════════════════════════════════════════════════════════
@@ -435,9 +476,14 @@ printf '%s%s└─────────────────────�
 
 
 # Fire all builds at once — no waiting between tiers
-fire_builds "Tier 0 — Foundation" "${TIER_0[@]}"
-fire_builds "Tier 1 — APIs & Services" "${TIER_1[@]}"
-fire_builds "Tier 2 — Clients & Bots" "${TIER_2[@]}"
+for tier in $(seq 0 "$MAX_TIER"); do
+  tier_label="${TIER_LABELS[$tier]:-Tier $tier}"
+  # shellcheck disable=SC2206
+  tier_svcs=(${TIER_SERVICES[$tier]})
+  if [ ${#tier_svcs[@]} -gt 0 ]; then
+    fire_builds "$tier_label" "${tier_svcs[@]}"
+  fi
+done
 
 if ! $NO_PARALLEL; then
   echo ""
@@ -454,17 +500,23 @@ printf '%s%s│  Transfer & restart tier-by-tier in dependency order     │%s\n
 printf '%s%s└──────────────────────────────────────────────────────────┘%s\n' "$GREEN" "$BOLD" "$RESET"
 
 
-header "━━━ TIER 0 — Foundation ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-if ! deploy_tier "Tier 0 — Foundation" "${TIER_0[@]}"; then
-  fail "Aborting deployment — foundation tier failed"
-  exit 1
-fi
+for tier in $(seq 0 "$MAX_TIER"); do
+  tier_label="${TIER_LABELS[$tier]:-Tier $tier}"
+  # shellcheck disable=SC2206
+  tier_svcs=(${TIER_SERVICES[$tier]})
+  if [ ${#tier_svcs[@]} -eq 0 ]; then
+    continue
+  fi
 
-header "━━━ TIER 1 — APIs & Services ━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-deploy_tier "Tier 1 — APIs & Services" "${TIER_1[@]}"
-
-header "━━━ TIER 2 — Clients & Bots ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-deploy_tier "Tier 2 — Clients & Bots" "${TIER_2[@]}"
+  header "━━━ ${tier_label} ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  if ! deploy_tier "$tier_label" "${tier_svcs[@]}"; then
+    # Tier 0 failure is fatal — vault must succeed
+    if [ "$tier" -eq 0 ]; then
+      fail "Aborting deployment — foundation tier failed"
+      exit 1
+    fi
+  fi
+done
 
 
 # ── Summary ───────────────────────────────────────────────────
