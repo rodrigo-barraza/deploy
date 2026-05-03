@@ -43,22 +43,23 @@ ALL_SERVICES=("${TIER_0[@]}" "${TIER_1[@]}" "${TIER_2[@]}")
 
 # ── Service colors (for prefixed output in parallel mode) ─────
 # Each service gets a unique color so interleaved output is readable
+# Use $'\033' (ANSI-C quoting) so sed receives real ESC bytes, not literal \033
 declare -A SVC_COLORS=(
-  [vault-service]="\033[33m"          # yellow
-  [prism-service]="\033[36m"          # cyan
-  [tools-service]="\033[35m"          # magenta
-  [portal-service]="\033[34m"         # blue
-  [lights-service]="\033[32m"         # green
-  [clock-crew-service]="\033[94m"     # bright blue
-  [lupos-bot]="\033[91m"              # bright red
-  [rod-dev-client]="\033[93m"         # bright yellow
-  [prism-client]="\033[95m"          # bright magenta
-  [portal-client]="\033[96m"          # bright cyan
-  [clock-crew-client]="\033[96m"      # bright cyan
-  [messages-service]="\033[92m"        # bright green
-  [messages-client]="\033[33;1m"       # bold yellow
-  [lights-client]="\033[32;1m"         # bold green
-  [classic-whitemane-client]="\033[34;1m" # bold blue
+  [vault-service]=$'\033[33m'          # yellow
+  [prism-service]=$'\033[36m'          # cyan
+  [tools-service]=$'\033[35m'          # magenta
+  [portal-service]=$'\033[34m'         # blue
+  [lights-service]=$'\033[32m'         # green
+  [clock-crew-service]=$'\033[94m'     # bright blue
+  [lupos-bot]=$'\033[91m'              # bright red
+  [rod-dev-client]=$'\033[93m'         # bright yellow
+  [prism-client]=$'\033[95m'           # bright magenta
+  [portal-client]=$'\033[96m'          # bright cyan
+  [clock-crew-client]=$'\033[96m'      # bright cyan
+  [messages-service]=$'\033[92m'       # bright green
+  [messages-client]=$'\033[33;1m'      # bold yellow
+  [lights-client]=$'\033[32;1m'        # bold green
+  [classic-whitemane-client]=$'\033[34;1m' # bold blue
 )
 
 # ── Flags ─────────────────────────────────────────────────────
@@ -82,22 +83,8 @@ for arg in "$@"; do
   esac
 done
 
-# ── Colors ────────────────────────────────────────────────────
-BOLD="\033[1m"
-DIM="\033[2m"
-CYAN="\033[36m"
-GREEN="\033[32m"
-YELLOW="\033[33m"
-RED="\033[31m"
-MAGENTA="\033[35m"
-RESET="\033[0m"
-
-header()  { echo -e "\n${MAGENTA}${BOLD}$1${RESET}"; }
-step()    { echo -e "\n${CYAN}${BOLD}▸ $1${RESET}"; }
-info()    { echo -e "  ${DIM}$1${RESET}"; }
-ok()      { echo -e "  ${GREEN}✔ $1${RESET}"; }
-warn()    { echo -e "  ${YELLOW}⚠ $1${RESET}"; }
-fail()    { echo -e "  ${RED}✖ $1${RESET}"; }
+# ── Colors & logging (shared) ─────────────────────────────────
+source "${SCRIPT_DIR}/colors.sh"
 
 # ── Service filter ────────────────────────────────────────────
 should_deploy() {
@@ -397,22 +384,22 @@ DEPLOY_START=$SECONDS
 
 # ── Header ────────────────────────────────────────────────────
 echo ""
-echo -e "${MAGENTA}${BOLD}══════════════════════════════════════════════════════════════${RESET}"
-echo -e "${MAGENTA}${BOLD}  ☀️  Sun — Deploy All Services${RESET}"
-echo -e "${DIM}  Two-phase pipeline: build all → deploy in order${RESET}"
+printf '%s%s══════════════════════════════════════════════════════════════%s\n' "$MAGENTA" "$BOLD" "$RESET"
+printf '%s%s  ☀️  Sun — Deploy All Services%s\n' "$MAGENTA" "$BOLD" "$RESET"
+printf '  %sTwo-phase pipeline: build all → deploy in order%s\n' "$DIM" "$RESET"
 if $DRY_RUN; then
-  echo -e "${YELLOW}${BOLD}  ⚠  DRY RUN — no changes will be made${RESET}"
+  printf '%s%s  ⚠  DRY RUN — no changes will be made%s\n' "$YELLOW" "$BOLD" "$RESET"
 fi
 if [ -n "$ONLY" ]; then
-  echo -e "${CYAN}  Only: ${ONLY}${RESET}"
+  printf '  %sOnly: %s%s\n' "$CYAN" "$ONLY" "$RESET"
 fi
 if [ -n "$SKIP_LIST" ]; then
-  echo -e "${CYAN}  Skipping: ${SKIP_LIST}${RESET}"
+  printf '  %sSkipping: %s%s\n' "$CYAN" "$SKIP_LIST" "$RESET"
 fi
 if $CHANGED_ONLY; then
-  echo -e "${CYAN}  Mode: changed-only (skipping unchanged services)${RESET}"
+  printf '  %sMode: changed-only (skipping unchanged services)%s\n' "$CYAN" "$RESET"
 fi
-echo -e "${MAGENTA}${BOLD}══════════════════════════════════════════════════════════════${RESET}"
+printf '%s%s══════════════════════════════════════════════════════════════%s\n' "$MAGENTA" "$BOLD" "$RESET"
 
 # ── Prepare log directory ─────────────────────────────────────
 mkdir -p "$LOG_DIR"
@@ -441,10 +428,10 @@ fi
 # PHASE 1 — BUILD ALL (fire all tiers simultaneously)
 # ══════════════════════════════════════════════════════════════
 echo ""
-echo -e "${CYAN}${BOLD}┌──────────────────────────────────────────────────────────┐${RESET}"
-echo -e "${CYAN}${BOLD}│  PHASE 1 — BUILD                                        │${RESET}"
-echo -e "${CYAN}${BOLD}│  All services build in parallel across all tiers         │${RESET}"
-echo -e "${CYAN}${BOLD}└──────────────────────────────────────────────────────────┘${RESET}"
+printf '%s%s┌──────────────────────────────────────────────────────────┐%s\n' "$CYAN" "$BOLD" "$RESET"
+printf '%s%s│  PHASE 1 — BUILD                                        │%s\n' "$CYAN" "$BOLD" "$RESET"
+printf '%s%s│  All services build in parallel across all tiers         │%s\n' "$CYAN" "$BOLD" "$RESET"
+printf '%s%s└──────────────────────────────────────────────────────────┘%s\n' "$CYAN" "$BOLD" "$RESET"
 
 
 # Fire all builds at once — no waiting between tiers
@@ -461,10 +448,10 @@ fi
 # PHASE 2 — WAIT & DEPLOY IN ORDER
 # ══════════════════════════════════════════════════════════════
 echo ""
-echo -e "${GREEN}${BOLD}┌──────────────────────────────────────────────────────────┐${RESET}"
-echo -e "${GREEN}${BOLD}│  PHASE 2 — DEPLOY                                       │${RESET}"
-echo -e "${GREEN}${BOLD}│  Transfer & restart tier-by-tier in dependency order     │${RESET}"
-echo -e "${GREEN}${BOLD}└──────────────────────────────────────────────────────────┘${RESET}"
+printf '%s%s┌──────────────────────────────────────────────────────────┐%s\n' "$GREEN" "$BOLD" "$RESET"
+printf '%s%s│  PHASE 2 — DEPLOY                                       │%s\n' "$GREEN" "$BOLD" "$RESET"
+printf '%s%s│  Transfer & restart tier-by-tier in dependency order     │%s\n' "$GREEN" "$BOLD" "$RESET"
+printf '%s%s└──────────────────────────────────────────────────────────┘%s\n' "$GREEN" "$BOLD" "$RESET"
 
 
 header "━━━ TIER 0 — Foundation ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -484,9 +471,9 @@ deploy_tier "Tier 2 — Clients & Bots" "${TIER_2[@]}"
 TOTAL=$((SECONDS - DEPLOY_START))
 
 echo ""
-echo -e "${MAGENTA}${BOLD}══════════════════════════════════════════════════════════════${RESET}"
-echo -e "${MAGENTA}${BOLD}  ☀️  Deploy All — Summary${RESET}"
-echo -e "${MAGENTA}${BOLD}══════════════════════════════════════════════════════════════${RESET}"
+printf '%s%s══════════════════════════════════════════════════════════════%s\n' "$MAGENTA" "$BOLD" "$RESET"
+printf '%s%s  ☀️  Deploy All — Summary%s\n' "$MAGENTA" "$BOLD" "$RESET"
+printf '%s%s══════════════════════════════════════════════════════════════%s\n' "$MAGENTA" "$BOLD" "$RESET"
 
 PASS=0
 FAILED=0
@@ -495,17 +482,17 @@ SKIPPED=0
 for svc in "${ALL_SERVICES[@]}"; do
   local_status=$(cat "${LOG_DIR}/${svc}.deploy.status" 2>/dev/null || echo "SKIP")
   case "$local_status" in
-    OK)   echo -e "  ${GREEN}✔ ${svc}${RESET}"; PASS=$((PASS + 1)) ;;
-    FAIL) echo -e "  ${RED}✖ ${svc}${RESET}  →  ${LOG_DIR}/${svc}.deploy.log"; FAILED=$((FAILED + 1)) ;;
-    *)    echo -e "  ${DIM}⊘ ${svc} (skipped)${RESET}"; SKIPPED=$((SKIPPED + 1)) ;;
+    OK)   printf '  %s✔ %s%s\n' "$GREEN" "$svc" "$RESET"; PASS=$((PASS + 1)) ;;
+    FAIL) printf '  %s✖ %s%s  →  %s\n' "$RED" "$svc" "$RESET" "${LOG_DIR}/${svc}.deploy.log"; FAILED=$((FAILED + 1)) ;;
+    *)    printf '  %s⊘ %s (skipped)%s\n' "$DIM" "$svc" "$RESET"; SKIPPED=$((SKIPPED + 1)) ;;
   esac
 done
 
 echo ""
-echo -e "  ${GREEN}${PASS} passed${RESET}  ${RED}${FAILED} failed${RESET}  ${DIM}${SKIPPED} skipped${RESET}"
-echo -e "  ${DIM}Total: ${TOTAL}s${RESET}"
+printf '  %s%s passed%s  %s%s failed%s  %s%s skipped%s\n' "$GREEN" "$PASS" "$RESET" "$RED" "$FAILED" "$RESET" "$DIM" "$SKIPPED" "$RESET"
+printf '  %sTotal: %ss%s\n' "$DIM" "$TOTAL" "$RESET"
 echo ""
-echo -e "${MAGENTA}${BOLD}══════════════════════════════════════════════════════════════${RESET}"
+printf '%s%s══════════════════════════════════════════════════════════════%s\n' "$MAGENTA" "$BOLD" "$RESET"
 
 # Non-zero exit if anything failed
 [ "$FAILED" -eq 0 ]

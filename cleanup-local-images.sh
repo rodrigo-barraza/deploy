@@ -12,22 +12,9 @@
 
 set -euo pipefail
 
-# ── Colors ────────────────────────────────────────────────────
-BOLD="\033[1m"
-DIM="\033[2m"
-CYAN="\033[36m"
-GREEN="\033[32m"
-YELLOW="\033[33m"
-RED="\033[31m"
-MAGENTA="\033[35m"
-RESET="\033[0m"
-
-header()  { echo -e "\n${MAGENTA}${BOLD}$1${RESET}"; }
-step()    { echo -e "\n${CYAN}${BOLD}▸ $1${RESET}"; }
-info()    { echo -e "  ${DIM}$1${RESET}"; }
-ok()      { echo -e "  ${GREEN}✔ $1${RESET}"; }
-warn()    { echo -e "  ${YELLOW}⚠ $1${RESET}"; }
-fail()    { echo -e "  ${RED}✖ $1${RESET}"; }
+# ── Colors & logging (shared) ─────────────────────────────────
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+source "${SCRIPT_DIR}/colors.sh"
 
 # ── Config ────────────────────────────────────────────────────
 # Current service image names (the ones deploy-all.sh builds)
@@ -73,9 +60,9 @@ done
 
 # ── Header ────────────────────────────────────────────────────
 echo ""
-echo -e "${MAGENTA}${BOLD}══════════════════════════════════════════════════════${RESET}"
-echo -e "${MAGENTA}${BOLD}  🧹 Sun — Local Image Cleanup${RESET}"
-echo -e "${MAGENTA}${BOLD}══════════════════════════════════════════════════════${RESET}"
+printf '%s%s══════════════════════════════════════════════════════%s\n' "$MAGENTA" "$BOLD" "$RESET"
+printf '%s%s  🧹 Sun — Local Image Cleanup%s\n' "$MAGENTA" "$BOLD" "$RESET"
+printf '%s%s══════════════════════════════════════════════════════%s\n' "$MAGENTA" "$BOLD" "$RESET"
 
 # ── Phase 1: Remove old SHA-tagged images (keep only :latest) ─
 step "Scanning for stale SHA-tagged images"
@@ -143,15 +130,15 @@ ESTIMATED_SAVINGS=$(docker images --format '{{.Repository}} {{.Tag}} {{.Size}}' 
   || true)
 
 echo ""
-echo -e "${CYAN}${BOLD}  Summary:${RESET}"
-echo -e "  ${DIM}Stale SHA tags:  ${STALE_COUNT}${RESET}"
-echo -e "  ${DIM}Legacy images:   ${LEGACY_COUNT}${RESET}"
-echo -e "  ${DIM}Total to remove: ${TOTAL}${RESET}"
+printf '  %s%sSummary:%s\n' "$CYAN" "$BOLD" "$RESET"
+printf '  %sStale SHA tags:  %s%s\n' "$DIM" "$STALE_COUNT" "$RESET"
+printf '  %sLegacy images:   %s%s\n' "$DIM" "$LEGACY_COUNT" "$RESET"
+printf '  %sTotal to remove: %s%s\n' "$DIM" "$TOTAL" "$RESET"
 
 # ── Confirmation ──────────────────────────────────────────────
 if ! $FORCE; then
   echo ""
-  echo -en "  ${YELLOW}Proceed with cleanup? [y/N] ${RESET}"
+  printf '  %sProceed with cleanup? [y/N] %s' "$YELLOW" "$RESET"
   read -r confirm
   if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
     info "Aborted"
@@ -192,8 +179,8 @@ docker image prune -f 2>/dev/null | sed 's/^/  /' || true
 
 # ── Final summary ─────────────────────────────────────────────
 echo ""
-echo -e "${GREEN}${BOLD}══════════════════════════════════════════════════════${RESET}"
-echo -e "${GREEN}${BOLD}  ✅ Cleanup complete${RESET}"
-echo -e "${DIM}  Removed: $((REMOVED + REMOVED_LEGACY)) images${RESET}"
-echo -e "${GREEN}${BOLD}══════════════════════════════════════════════════════${RESET}"
+printf '%s%s══════════════════════════════════════════════════════%s\n' "$GREEN" "$BOLD" "$RESET"
+printf '%s%s  ✅ Cleanup complete%s\n' "$GREEN" "$BOLD" "$RESET"
+printf '  %sRemoved: %s images%s\n' "$DIM" "$((REMOVED + REMOVED_LEGACY))" "$RESET"
+printf '%s%s══════════════════════════════════════════════════════%s\n' "$GREEN" "$BOLD" "$RESET"
 echo ""

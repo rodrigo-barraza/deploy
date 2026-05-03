@@ -76,38 +76,30 @@ for arg in "$@"; do
   esac
 done
 
-# ── Colors ────────────────────────────────────────────────────
-BOLD="\033[1m"
-DIM="\033[2m"
-CYAN="\033[36m"
-GREEN="\033[32m"
-YELLOW="\033[33m"
-RED="\033[31m"
-RESET="\033[0m"
+# ── Colors & logging (shared) ─────────────────────────────────
+DEPLOY_KIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "${DEPLOY_KIT_DIR}/colors.sh"
 
-step()  { echo -e "\n${CYAN}${BOLD}▸ $1${RESET}"; }
-info()  { echo -e "  ${DIM}$1${RESET}"; }
-ok()    { echo -e "  ${GREEN}✔ $1${RESET}"; }
-warn()  { echo -e "  ${YELLOW}⚠ $1${RESET}"; }
-fail()  { echo -e "  ${RED}✖ $1${RESET}"; exit 1; }
+# Override fail() to also exit (lib.sh is fatal on failure)
+fail()  { printf '  %s✖ %s%s\n' "$RED" "$1" "$RESET"; exit 1; }
 
 # ── Timer ─────────────────────────────────────────────────────
 DEPLOY_START=$SECONDS
 
 # ── Header ────────────────────────────────────────────────────
 echo ""
-echo -e "${CYAN}${BOLD}══════════════════════════════════════════════════════${RESET}"
+printf '%s%s══════════════════════════════════════════════════════%s\n' "$CYAN" "$BOLD" "$RESET"
 if $BUILD_ONLY; then
-  echo -e "${CYAN}${BOLD}  ${DISPLAY_NAME} — Build${RESET}"
+  printf '%s%s  %s — Build%s\n' "$CYAN" "$BOLD" "$DISPLAY_NAME" "$RESET"
 elif $DEPLOY_ONLY; then
-  echo -e "${CYAN}${BOLD}  ${DISPLAY_NAME} — Deploy to Synology${RESET}"
+  printf '%s%s  %s — Deploy to Synology%s\n' "$CYAN" "$BOLD" "$DISPLAY_NAME" "$RESET"
 else
-  echo -e "${CYAN}${BOLD}  ${DISPLAY_NAME} — Build & Deploy to Synology${RESET}"
+  printf '%s%s  %s — Build & Deploy to Synology%s\n' "$CYAN" "$BOLD" "$DISPLAY_NAME" "$RESET"
 fi
 if $DRY_RUN; then
-  echo -e "${YELLOW}${BOLD}  ⚠  DRY RUN — no changes will be made${RESET}"
+  printf '%s%s  ⚠  DRY RUN — no changes will be made%s\n' "$YELLOW" "$BOLD" "$RESET"
 fi
-echo -e "${CYAN}${BOLD}══════════════════════════════════════════════════════${RESET}"
+printf '%s%s══════════════════════════════════════════════════════%s\n' "$CYAN" "$BOLD" "$RESET"
 
 # ══════════════════════════════════════════════════════════════
 # BUILD PHASE (validate → pull → build)
@@ -194,14 +186,14 @@ if ! $DEPLOY_ONLY; then
   if $BUILD_ONLY; then
     TOTAL=$((SECONDS - DEPLOY_START))
     echo ""
-    echo -e "${GREEN}${BOLD}══════════════════════════════════════════════════════${RESET}"
-    echo -e "${GREEN}${BOLD}  ✅ Build complete in ${TOTAL}s${RESET}"
+    printf '%s%s══════════════════════════════════════════════════════%s\n' "$GREEN" "$BOLD" "$RESET"
+    printf '%s%s  ✅ Build complete in %ss%s\n' "$GREEN" "$BOLD" "$TOTAL" "$RESET"
     cd "$SCRIPT_DIR"
     GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
     GIT_BRANCH=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "unknown")
     BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-    echo -e "${DIM}  ${GIT_BRANCH}@${GIT_SHA} (${BUILD_TIME})${RESET}"
-    echo -e "${GREEN}${BOLD}══════════════════════════════════════════════════════${RESET}"
+    printf '  %s%s@%s (%s)%s\n' "$DIM" "$GIT_BRANCH" "$GIT_SHA" "$BUILD_TIME" "$RESET"
+    printf '%s%s══════════════════════════════════════════════════════%s\n' "$GREEN" "$BOLD" "$RESET"
     echo ""
     exit 0
   fi
@@ -303,26 +295,26 @@ else
     info "Copying to NAS..."
     if ! mkdir -p "${NAS_SMB_DIR}" 2>/dev/null; then
       rm -f "/tmp/${TARBALL}"
-      echo -e "  ${RED}✖ Cannot create ${NAS_SMB_DIR} — is /mnt/k mounted? Check permissions.${RESET}" >&2
+      printf '  %s✖ Cannot create %s — is /mnt/k mounted? Check permissions.%s\n' "$RED" "$NAS_SMB_DIR" "$RESET" >&2
       exit 1
     fi
 
     if ! cp "/tmp/${TARBALL}" "${NAS_SMB_DIR}/${TARBALL}"; then
       rm -f "/tmp/${TARBALL}"
-      echo -e "  ${RED}✖ Failed to copy image tarball to ${NAS_SMB_DIR}${RESET}" >&2
+      printf '  %s✖ Failed to copy image tarball to %s%s\n' "$RED" "$NAS_SMB_DIR" "$RESET" >&2
       exit 1
     fi
 
     if ! cp "${SCRIPT_DIR}/docker-compose.yml" "${NAS_SMB_DIR}/docker-compose.yml"; then
       rm -f "/tmp/${TARBALL}"
-      echo -e "  ${RED}✖ Failed to copy docker-compose.yml to ${NAS_SMB_DIR}${RESET}" >&2
+      printf '  %s✖ Failed to copy docker-compose.yml to %s%s\n' "$RED" "$NAS_SMB_DIR" "$RESET" >&2
       exit 1
     fi
 
     if [ "$SKIP_ENV_DEPLOY" != "true" ] && [ -f "$DEPLOY_ENV" ]; then
       if ! cp "$DEPLOY_ENV" "${NAS_SMB_DIR}/.env"; then
         rm -f "/tmp/${TARBALL}"
-        echo -e "  ${RED}✖ Failed to copy .env to ${NAS_SMB_DIR}${RESET}" >&2
+        printf '  %s✖ Failed to copy .env to %s%s\n' "$RED" "$NAS_SMB_DIR" "$RESET" >&2
         exit 1
       fi
     fi
@@ -345,12 +337,12 @@ fi
 # ── Summary ───────────────────────────────────────────────────
 TOTAL=$((SECONDS - DEPLOY_START))
 echo ""
-echo -e "${GREEN}${BOLD}══════════════════════════════════════════════════════${RESET}"
+printf '%s%s══════════════════════════════════════════════════════%s\n' "$GREEN" "$BOLD" "$RESET"
 if $DEPLOY_ONLY; then
-  echo -e "${GREEN}${BOLD}  ✅ Deploy complete in ${TOTAL}s${RESET}"
+  printf '%s%s  ✅ Deploy complete in %ss%s\n' "$GREEN" "$BOLD" "$TOTAL" "$RESET"
 else
-  echo -e "${GREEN}${BOLD}  ✅ Build & deploy complete in ${TOTAL}s${RESET}"
+  printf '%s%s  ✅ Build & deploy complete in %ss%s\n' "$GREEN" "$BOLD" "$TOTAL" "$RESET"
 fi
-echo -e "${DIM}  ${GIT_BRANCH}@${GIT_SHA} → ${NAS_HOST} (${BUILD_TIME})${RESET}"
-echo -e "${GREEN}${BOLD}══════════════════════════════════════════════════════${RESET}"
+printf '  %s%s@%s → %s (%s)%s\n' "$DIM" "$GIT_BRANCH" "$GIT_SHA" "$NAS_HOST" "$BUILD_TIME" "$RESET"
+printf '%s%s══════════════════════════════════════════════════════%s\n' "$GREEN" "$BOLD" "$RESET"
 echo ""
