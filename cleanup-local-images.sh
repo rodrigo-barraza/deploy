@@ -39,7 +39,7 @@ CURRENT_SERVICES=(
   lights-service
   clock-crew-service
   messages-service
-  retina-client
+  prism-client
   portal-client
   rod-dev-client
   lupos-bot
@@ -57,6 +57,7 @@ LEGACY_NAMES=(
   lights
   lupos
   retina
+  retina-client
   portal
   rod-dev
   clock-crew

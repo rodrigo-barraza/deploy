@@ -26,7 +26,7 @@ Services with special needs define functions before sourcing:
 | Hook | Purpose | Used by |
 |---|---|---|
 | `EXTRA_VALIDATE()` | Additional file checks | vault |
-| `PRE_BUILD()` | Set `BUILD_ARGS` before Docker build | portal, retina, rod-dev |
+| `PRE_BUILD()` | Set `BUILD_ARGS` before Docker build | portal, prism-client, rod-dev |
 | `EXTRA_SSH_SYNC()` | Sync extra files during SSH deploy | vault, rod-dev |
 | `EXTRA_SMB_SYNC()` | Sync extra files during SMB fallback | vault |
 
@@ -51,6 +51,6 @@ npm run deploy -- --dry-run
 # All services (from sun/ root)
 npm run deploy
 npm run deploy:dry
-npm run deploy -- --only=prism,retina
+npm run deploy -- --only=prism,prism-client
 npm run deploy -- --skip=lupos
 ```

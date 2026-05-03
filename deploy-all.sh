@@ -14,7 +14,7 @@
 # Tiers (sequential between tiers for deploy, parallel builds):
 #   0. Foundation   — vault-service (secret store, must be up first)
 #   1. APIs         — prism-service, tools-service, portal-service, lights-service, clock-crew-service
-#   2. Clients/Bots — retina-client, portal-client, rod-dev-client, lupos-bot, clock-crew-client
+#   2. Clients/Bots — prism-client, portal-client, rod-dev-client, lupos-bot, clock-crew-client
 #
 # Usage:
 #   npm run deploy                         # full deploy
@@ -22,7 +22,7 @@
 #   npm run deploy -- --skip-pull          # skip git pull
 #   npm run deploy -- --no-cache           # rebuild images from scratch
 #   npm run deploy -- --changed-only       # only build+deploy services with git changes
-#   npm run deploy -- --only=prism-service,retina-client  # deploy specific services
+#   npm run deploy -- --only=prism-service,prism-client  # deploy specific services
 #   npm run deploy -- --skip=lupos-bot,lights-service  # skip specific services
 #   npm run deploy -- --no-parallel        # disable parallel builds
 # ============================================================
@@ -37,7 +37,7 @@ LOG_DIR="${SCRIPT_DIR}/.deploy-logs"
 # Deployment tiers — sequential between tiers, parallel within
 TIER_0=(vault-service)
 TIER_1=(prism-service tools-service portal-service lights-service clock-crew-service messages-service)
-TIER_2=(retina-client portal-client rod-dev-client lupos-bot clock-crew-client messages-client lights-client)
+TIER_2=(prism-client portal-client rod-dev-client lupos-bot clock-crew-client messages-client lights-client)
 
 ALL_SERVICES=("${TIER_0[@]}" "${TIER_1[@]}" "${TIER_2[@]}")
 
@@ -52,7 +52,7 @@ declare -A SVC_COLORS=(
   [clock-crew-service]="\033[94m"     # bright blue
   [lupos-bot]="\033[91m"              # bright red
   [rod-dev-client]="\033[93m"         # bright yellow
-  [retina-client]="\033[95m"          # bright magenta
+  [prism-client]="\033[95m"          # bright magenta
   [portal-client]="\033[96m"          # bright cyan
   [clock-crew-client]="\033[96m"      # bright cyan
   [messages-service]="\033[92m"        # bright green
