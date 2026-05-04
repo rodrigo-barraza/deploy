@@ -458,6 +458,27 @@ if [ ${#MISSING[@]} -gt 0 ]; then
   warn "These services will be skipped"
 fi
 
+# ── Pre-flight: prune orphaned Docker networks on NAS ─────────
+# Docker has a limited pool of /16 subnets for bridge networks.
+# Old/renamed services leave behind orphaned networks that exhaust
+# the pool, causing "could not find an available IPv4 address pool"
+# errors during deploy. Pruning unused networks prevents this.
+if ! $DRY_RUN; then
+  step "Pruning orphaned Docker networks on NAS"
+  if ssh -o ConnectTimeout=8 -o BatchMode=yes nas "true" 2>/dev/null; then
+    PRUNED=$(ssh nas "sudo /usr/local/bin/docker network prune -f 2>&1" || true)
+    PRUNED_COUNT=$(echo "$PRUNED" | grep -c "Deleted Networks:" || echo "0")
+    PRUNED_NAMES=$(echo "$PRUNED" | grep -v "Deleted Networks:" | grep -v "Total reclaimed" | grep -v "^$" | tr '\n' ' ')
+    if [ -n "$PRUNED_NAMES" ]; then
+      ok "Pruned: ${PRUNED_NAMES}"
+    else
+      ok "No orphaned networks"
+    fi
+  else
+    warn "Cannot reach NAS — skipping network prune (may fail later)"
+  fi
+fi
+
 # ── Tier labels (descriptive names for output) ───────────────
 declare -A TIER_LABELS=(
   [0]="Tier 0 — Foundation"

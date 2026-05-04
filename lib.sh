@@ -268,8 +268,28 @@ if $HAS_SSH; then
 
     # Restart container
     info "Restarting container..."
-    ssh "$NAS_HOST" "cd '${NAS_COMPOSE_DIR}' && sudo ${DOCKER_BIN} compose down --remove-orphans && sudo ${DOCKER_BIN} compose up -d"
-    ok "Container restarted"
+    COMPOSE_OUTPUT=$(ssh "$NAS_HOST" "cd '${NAS_COMPOSE_DIR}' && sudo ${DOCKER_BIN} compose down --remove-orphans 2>&1 && sudo ${DOCKER_BIN} compose up -d 2>&1" 2>&1)
+    COMPOSE_EXIT=$?
+    echo "$COMPOSE_OUTPUT" | sed 's/^/ /'
+
+    # Check for known Docker infrastructure failures even if exit code is 0
+    if echo "$COMPOSE_OUTPUT" | grep -qiE 'could not find an available.*address pool|port is already allocated|driver failed programming'; then
+      fail "Container failed to start — Docker infrastructure error detected (network pool exhaustion or port conflict)"
+    fi
+
+    if [ "$COMPOSE_EXIT" -ne 0 ]; then
+      fail "Container restart failed (exit ${COMPOSE_EXIT})"
+    fi
+
+    # Verify container is actually running (not just "Created" or crash-looping)
+    sleep 2
+    CONTAINER_STATUS=$(ssh "$NAS_HOST" "sudo ${DOCKER_BIN} ps --filter 'name=^${IMAGE_NAME}$' --format '{{.Status}}'" 2>/dev/null || echo "")
+    if [ -z "$CONTAINER_STATUS" ]; then
+      fail "Container '${IMAGE_NAME}' not found after restart — deploy failed"
+    elif echo "$CONTAINER_STATUS" | grep -qiE '^Restarting|^Exited|^Created'; then
+      fail "Container '${IMAGE_NAME}' is not running (status: ${CONTAINER_STATUS})"
+    fi
+    ok "Container running (${CONTAINER_STATUS})"
 
     # Clean up old SHA-tagged images (keeps only :latest)
     info "Pruning old images..."
