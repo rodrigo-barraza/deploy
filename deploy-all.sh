@@ -468,7 +468,7 @@ if ! $DRY_RUN; then
   if ssh -o ConnectTimeout=8 -o BatchMode=yes nas "true" 2>/dev/null; then
     PRUNED=$(ssh nas "sudo /usr/local/bin/docker network prune -f 2>&1" || true)
     PRUNED_COUNT=$(echo "$PRUNED" | grep -c "Deleted Networks:" || echo "0")
-    PRUNED_NAMES=$(echo "$PRUNED" | grep -v "Deleted Networks:" | grep -v "Total reclaimed" | grep -v "^$" | tr '\n' ' ')
+    PRUNED_NAMES=$(echo "$PRUNED" | grep -v "Deleted Networks:" | grep -v "Total reclaimed" | grep -v "^$" | tr '\n' ' ' || true)
     if [ -n "$PRUNED_NAMES" ]; then
       ok "Pruned: ${PRUNED_NAMES}"
     else
