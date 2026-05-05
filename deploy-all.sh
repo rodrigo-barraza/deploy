@@ -44,15 +44,21 @@ fi
 
 # ── Dynamically load tiers from services.json ─────────────────
 # Uses Node.js (always available) to parse JSON and emit bash-eval
-# assignments: MAX_TIER, TIER_SERVICES[n], TIER_<n> arrays.
+# assignments: MAX_TIER, TIER_SERVICES[n], TIER_<n> arrays,
+# and SVC_HEALTH_URL[id] for health-gating between tiers.
 ALL_SERVICES=()
 declare -A TIER_SERVICES  # tier -> space-separated service IDs
+declare -A SVC_HEALTH_URL # service-id -> health check URL
 
 eval "$(node -e "
   const s = require('$SERVICES_JSON');
+  const host = s.defaultHost || 'localhost';
   const tiers = {};
   for (const svc of s.services) {
     (tiers[svc.deployTier] ??= []).push(svc.id);
+    if (svc.port && svc.healthPath) {
+      console.log('SVC_HEALTH_URL[' + svc.id + ']=\"http://' + host + ':' + svc.port + svc.healthPath + '\"');
+    }
   }
   const max = Math.max(...Object.keys(tiers).map(Number));
   console.log('MAX_TIER=' + max);
@@ -413,6 +419,62 @@ deploy_tier() {
   fi
 }
 
+# ── Health-gate: wait for a tier to become healthy ────────────
+# After deploying a tier, poll health endpoints until all services
+# respond 2xx or timeout. Prevents boot-order races where later
+# tiers start before their dependencies are ready.
+HEALTH_GATE_TIMEOUT=60    # seconds per service
+HEALTH_GATE_INTERVAL=3    # seconds between polls
+
+wait_tier_healthy() {
+  local tier_name="$1"
+  shift
+  local services=("$@")
+
+  # Only gate services that were actually deployed
+  local to_check=()
+  for svc in "${services[@]}"; do
+    local deploy_status
+    deploy_status=$(cat "${LOG_DIR}/${svc}.deploy.status" 2>/dev/null || echo "SKIP")
+    if [ "$deploy_status" = "OK" ] && [ -n "${SVC_HEALTH_URL[$svc]:-}" ]; then
+      to_check+=("$svc")
+    fi
+  done
+
+  if [ ${#to_check[@]} -eq 0 ]; then
+    return 0
+  fi
+
+  step "Health gate — waiting for ${tier_name} services to become healthy"
+
+  local all_healthy=true
+  for svc in "${to_check[@]}"; do
+    local url="${SVC_HEALTH_URL[$svc]}"
+    local elapsed=0
+    local healthy=false
+
+    while [ $elapsed -lt $HEALTH_GATE_TIMEOUT ]; do
+      if curl -sf --max-time 5 -o /dev/null "$url" 2>/dev/null; then
+        healthy=true
+        break
+      fi
+      sleep $HEALTH_GATE_INTERVAL
+      elapsed=$((elapsed + HEALTH_GATE_INTERVAL))
+    done
+
+    if $healthy; then
+      ok "${svc} healthy (${url})"
+    else
+      warn "${svc} not healthy after ${HEALTH_GATE_TIMEOUT}s — proceeding anyway"
+      all_healthy=false
+    fi
+  done
+
+  if $all_healthy; then
+    ok "All ${tier_name} services healthy ✓"
+  fi
+}
+
 # ── Timer ─────────────────────────────────────────────────────
 DEPLOY_START=$SECONDS
 
@@ -536,6 +598,12 @@ for tier in $(seq 0 "$MAX_TIER"); do
       fail "Aborting deployment — foundation tier failed"
       exit 1
     fi
+  fi
+
+  # Health-gate: wait for this tier's services to become healthy
+  # before deploying the next tier (skip for the last tier).
+  if [ "$tier" -lt "$MAX_TIER" ] && ! $DRY_RUN; then
+    wait_tier_healthy "$tier_label" "${tier_svcs[@]}"
   fi
 done
 
