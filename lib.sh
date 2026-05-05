@@ -299,12 +299,27 @@ if $HAS_SSH; then
     fi
 
     # Verify container is actually running (not just "Created" or crash-looping)
-    sleep 2
-    CONTAINER_STATUS=$(ssh "$NAS_HOST" "sudo ${DOCKER_BIN} ps --filter 'name=^${IMAGE_NAME}$' --format '{{.Status}}'" 2>/dev/null || echo "")
-    if [ -z "$CONTAINER_STATUS" ]; then
-      fail "Container '${IMAGE_NAME}' not found after restart — deploy failed"
-    elif echo "$CONTAINER_STATUS" | grep -qiE '^Restarting|^Exited|^Created'; then
-      fail "Container '${IMAGE_NAME}' is not running (status: ${CONTAINER_STATUS})"
+    # Retry loop: services may briefly crash-restart while waiting for dependencies
+    # (e.g., Vault not yet reachable on first boot). Give up to 20s to stabilize.
+    HEALTH_MAX=10        # max attempts
+    HEALTH_INTERVAL=2    # seconds between checks
+    HEALTH_OK=false
+    for _h in $(seq 1 $HEALTH_MAX); do
+      sleep $HEALTH_INTERVAL
+      CONTAINER_STATUS=$(ssh "$NAS_HOST" "sudo ${DOCKER_BIN} ps --filter 'name=^${IMAGE_NAME}$' --format '{{.Status}}'" 2>/dev/null || echo "")
+      if [ -z "$CONTAINER_STATUS" ]; then
+        fail "Container '${IMAGE_NAME}' not found after restart — deploy failed"
+      fi
+      if echo "$CONTAINER_STATUS" | grep -qiE '^Up'; then
+        HEALTH_OK=true
+        break
+      fi
+      if [ "$_h" -lt "$HEALTH_MAX" ]; then
+        info "Container not ready yet (${CONTAINER_STATUS}) — retrying in ${HEALTH_INTERVAL}s... (${_h}/${HEALTH_MAX})"
+      fi
+    done
+    if ! $HEALTH_OK; then
+      fail "Container '${IMAGE_NAME}' is not running after ${HEALTH_MAX} checks (status: ${CONTAINER_STATUS})"
     fi
     ok "Container running (${CONTAINER_STATUS})"
 
