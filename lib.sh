@@ -7,6 +7,7 @@
 #   IMAGE_NAME       (required)  e.g. "prism-service"
 #   DISPLAY_NAME     (optional)  e.g. "🔷 Prism Service"     — defaults to IMAGE_NAME
 #   BUILD_ARGS       (optional)  extra --build-arg flags
+#   BUILD_SECRETS    (optional)  extra --secret flags (BuildKit)
 #   BUILD_EXTRA_FLAGS(optional)  e.g. "--network=host"
 #   BUILD_TAIL_LINES (optional)  lines of build output to show (default: 5)
 #   SKIP_ENV_DEPLOY  (optional)  set "true" to skip .env.deploy validation
@@ -42,6 +43,7 @@ fi
 # ── Defaults ──────────────────────────────────────────────────
 DISPLAY_NAME="${DISPLAY_NAME:-$IMAGE_NAME}"
 BUILD_ARGS="${BUILD_ARGS:-}"
+BUILD_SECRETS="${BUILD_SECRETS:-}"
 BUILD_EXTRA_FLAGS="${BUILD_EXTRA_FLAGS:-}"
 BUILD_TAIL_LINES="${BUILD_TAIL_LINES:-5}"
 SKIP_ENV_DEPLOY="${SKIP_ENV_DEPLOY:-false}"
@@ -177,10 +179,11 @@ if ! $DEPLOY_ONLY; then
     BUILD_START_INNER=$SECONDS
     # Run with pipefail in a subshell so tail/sed don't swallow build failures
     set +e
-    (set -o pipefail; docker build \
+    (set -o pipefail; DOCKER_BUILDKIT=1 docker build \
       $NO_CACHE \
       $BUILD_EXTRA_FLAGS \
       $BUILD_ARGS \
+      $BUILD_SECRETS \
       --label "git.sha=${GIT_SHA}" \
       --label "git.branch=${GIT_BRANCH}" \
       --label "build.time=${BUILD_TIME}" \
