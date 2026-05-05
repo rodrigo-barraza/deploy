@@ -75,31 +75,12 @@ for s in "${!TIER_SERVICES[@]}"; do
   done
 done
 
-# ── Service colors (auto-assigned from rotating palette) ──────
-# Each service gets a unique color so interleaved output is readable.
-# Uses ANSI-C quoting ($'\033') so sed receives real ESC bytes.
-COLOR_PALETTE=(
-  $'\033[33m'     # yellow
-  $'\033[36m'     # cyan
-  $'\033[35m'     # magenta
-  $'\033[34m'     # blue
-  $'\033[32m'     # green
-  $'\033[94m'     # bright blue
-  $'\033[91m'     # bright red
-  $'\033[93m'     # bright yellow
-  $'\033[95m'     # bright magenta
-  $'\033[96m'     # bright cyan
-  $'\033[92m'     # bright green
-  $'\033[33;1m'   # bold yellow
-  $'\033[32;1m'   # bold green
-  $'\033[34;1m'   # bold blue
-  $'\033[35;1m'   # bold magenta
-  $'\033[36;1m'   # bold cyan
-  $'\033[31;1m'   # bold red
-)
+# ── Service colors (semantic per-category shades) ────────────
+# Services=blue, Clients=green, Bots=yellow. Red is errors only.
+# Shades rotate within each category for visual differentiation.
 declare -A SVC_COLORS
-for i in "${!ALL_SERVICES[@]}"; do
-  SVC_COLORS[${ALL_SERVICES[$i]}]="${COLOR_PALETTE[$((i % ${#COLOR_PALETTE[@]}))]}"
+for svc in "${ALL_SERVICES[@]}"; do
+  SVC_COLORS[$svc]=$(svc_color "$svc")
 done
 
 # ── Flags ─────────────────────────────────────────────────────
@@ -211,7 +192,7 @@ run_phase() {
   if [ "$prefix" = "true" ]; then
     bash "${svc_dir}/deploy.sh" ${phase_flag} $flags 2>&1 \
       | tee "$log_file" \
-      | sed -u "s/^/${color}${BOLD}[${pad_svc}]${RESET} /" \
+      | while IFS= read -r line; do printf '%s %s%s[%s]%s %s\n' "$(ts)" "$color" "$BOLD" "$pad_svc" "$RESET" "$line"; done \
       && echo "OK" > "$status_file" \
       || echo "FAIL" > "$status_file"
   else
@@ -622,8 +603,9 @@ SKIPPED=0
 
 for svc in "${ALL_SERVICES[@]}"; do
   local_status=$(cat "${LOG_DIR}/${svc}.deploy.status" 2>/dev/null || echo "SKIP")
+  local svc_clr="${SVC_COLORS[$svc]:-$DIM}"
   case "$local_status" in
-    OK)   printf '  %s✔ %s%s\n' "$GREEN" "$svc" "$RESET"; PASS=$((PASS + 1)) ;;
+    OK)   printf '  %s✔ %s%s\n' "$svc_clr" "$svc" "$RESET"; PASS=$((PASS + 1)) ;;
     FAIL) printf '  %s✖ %s%s  →  %s\n' "$RED" "$svc" "$RESET" "${LOG_DIR}/${svc}.deploy.log"; FAILED=$((FAILED + 1)) ;;
     *)    printf '  %s⊘ %s (skipped)%s\n' "$DIM" "$svc" "$RESET"; SKIPPED=$((SKIPPED + 1)) ;;
   esac
