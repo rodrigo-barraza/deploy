@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# Sun Deploy Kit — Shared Library
+# Deploy Kit — Shared Library
 #
 # Source this file from a per-service deploy.sh after setting:
 #
@@ -143,6 +143,20 @@ if ! $DEPLOY_ONLY; then
     fi
   else
     info "Skipping git pull (--skip-pull)"
+  fi
+
+  # ── 1.5 Run Tests ───────────────────────────────────────────
+  if grep -q '"test":' package.json 2>/dev/null; then
+    step "Running Tests"
+    if $DRY_RUN; then
+      info "(skipped — dry run)"
+    else
+      TEST_START=$SECONDS
+      if ! (set -o pipefail; export CI=true; npm run test --prefix "${SCRIPT_DIR}" 2>&1 | sed 's/^/  /'); then
+        fail "Tests failed! Aborting deployment."
+      fi
+      ok "Tests passed in $((SECONDS - TEST_START))s"
+    fi
   fi
 
   # ── 2. Build image ──────────────────────────────────────────

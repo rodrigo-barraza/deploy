@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# Sun Deploy Kit — Sync Deploy Scripts
+# Deploy Kit — Sync Deploy Scripts
 #
 # Reads vault-service/services.json and regenerates the
 # deploy:* entries in package.json so individual deploy

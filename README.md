@@ -1,4 +1,4 @@
-# Sun Deploy Kit
+# Deploy Kit
 
 Shared deployment infrastructure for all services. Contains:
 

@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# Sun Deploy Kit — Shared Colors & Logging
+# Deploy Kit — Shared Colors & Logging
 #
 # Source this file from any deploy-kit script:
 #   source "$(dirname "$0")/colors.sh"

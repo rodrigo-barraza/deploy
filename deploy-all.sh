@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# Sun — Deploy All Services
+# Deploy All Services
 #
 # Two-phase pipeline:
 #   Phase 1 — BUILD: all services build in parallel (or sequential
@@ -419,7 +419,7 @@ DEPLOY_START=$SECONDS
 # ── Header ────────────────────────────────────────────────────
 echo ""
 printf '%s%s══════════════════════════════════════════════════════════════%s\n' "$MAGENTA" "$BOLD" "$RESET"
-printf '%s%s  ☀️  Sun — Deploy All Services%s\n' "$MAGENTA" "$BOLD" "$RESET"
+printf '%s%s  🚀  Deploy All Services%s\n' "$MAGENTA" "$BOLD" "$RESET"
 printf '  %sTwo-phase pipeline: build all → deploy in order%s\n' "$DIM" "$RESET"
 if $DRY_RUN; then
   printf '%s%s  ⚠  DRY RUN — no changes will be made%s\n' "$YELLOW" "$BOLD" "$RESET"

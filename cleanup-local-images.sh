@@ -1,6 +1,6 @@
 #!/bin/bash
 # ============================================================
-# Sun Deploy Kit — Local Image Cleanup
+# Deploy Kit — Local Image Cleanup
 #
 # Removes stale SHA-tagged images and legacy-named images to
 # reclaim disk space. Only keeps :latest for current services.
@@ -61,7 +61,7 @@ done
 # ── Header ────────────────────────────────────────────────────
 echo ""
 printf '%s%s══════════════════════════════════════════════════════%s\n' "$MAGENTA" "$BOLD" "$RESET"
-printf '%s%s  🧹 Sun — Local Image Cleanup%s\n' "$MAGENTA" "$BOLD" "$RESET"
+printf '%s%s  🧹 Local Image Cleanup%s\n' "$MAGENTA" "$BOLD" "$RESET"
 printf '%s%s══════════════════════════════════════════════════════%s\n' "$MAGENTA" "$BOLD" "$RESET"
 
 # ── Phase 1: Remove old SHA-tagged images (keep only :latest) ─
