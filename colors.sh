@@ -24,12 +24,16 @@ RED=$'\033[31m'
 MAGENTA=$'\033[35m'
 RESET=$'\033[0m'
 
+# ── Timestamp helper ──────────────────────────────────────────
+ts() { printf '%s%s%s' "$DIM" "$(date +%H:%M:%S)" "$RESET"; }
+
 # ── Logging functions ─────────────────────────────────────────
 # Use printf so colors work correctly even when piped through
 # sed, tee, or redirected to log files and back.
-header()  { printf '\n%s%s%s%s\n' "$MAGENTA" "$BOLD" "$1" "$RESET"; }
-step()    { printf '\n%s%s▸ %s%s\n' "$CYAN" "$BOLD" "$1" "$RESET"; }
-info()    { printf '  %s%s%s\n' "$DIM" "$1" "$RESET"; }
-ok()      { printf '  %s✔ %s%s\n' "$GREEN" "$1" "$RESET"; }
-warn()    { printf '  %s⚠ %s%s\n' "$YELLOW" "$1" "$RESET"; }
-fail()    { printf '  %s✖ %s%s\n' "$RED" "$1" "$RESET"; }
+# Each line is prefixed with a local HH:MM:SS timestamp.
+header()  { printf '\n%s %s%s%s%s\n' "$(ts)" "$MAGENTA" "$BOLD" "$1" "$RESET"; }
+step()    { printf '\n%s %s%s▸ %s%s\n' "$(ts)" "$CYAN" "$BOLD" "$1" "$RESET"; }
+info()    { printf '%s   %s%s%s\n' "$(ts)" "$DIM" "$1" "$RESET"; }
+ok()      { printf '%s   %s✔ %s%s\n' "$(ts)" "$GREEN" "$1" "$RESET"; }
+warn()    { printf '%s   %s⚠ %s%s\n' "$(ts)" "$YELLOW" "$1" "$RESET"; }
+fail()    { printf '%s   %s✖ %s%s\n' "$(ts)" "$RED" "$1" "$RESET"; }

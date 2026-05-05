@@ -83,7 +83,7 @@ DEPLOY_KIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "${DEPLOY_KIT_DIR}/colors.sh"
 
 # Override fail() to also exit (lib.sh is fatal on failure)
-fail()  { printf '  %s✖ %s%s\n' "$RED" "$1" "$RESET"; exit 1; }
+fail()  { printf '%s   %s✖ %s%s\n' "$(ts)" "$RED" "$1" "$RESET"; exit 1; }
 
 # ── Timer ─────────────────────────────────────────────────────
 DEPLOY_START=$SECONDS
