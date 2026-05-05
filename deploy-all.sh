@@ -605,7 +605,7 @@ SKIPPED=0
 
 for svc in "${ALL_SERVICES[@]}"; do
   local_status=$(cat "${LOG_DIR}/${svc}.deploy.status" 2>/dev/null || echo "SKIP")
-  local svc_clr="${SVC_COLORS[$svc]:-$DIM}"
+  svc_clr="${SVC_COLORS[$svc]:-$DIM}"
   case "$local_status" in
     OK)   printf '  %s✔ %s%s\n' "$svc_clr" "$svc" "$RESET"; PASS=$((PASS + 1)) ;;
     FAIL) printf '  %s✖ %s%s  →  %s\n' "$RED" "$svc" "$RESET" "${LOG_DIR}/${svc}.deploy.log"; FAILED=$((FAILED + 1)) ;;
