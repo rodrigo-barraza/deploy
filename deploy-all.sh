@@ -75,6 +75,9 @@ for s in "${!TIER_SERVICES[@]}"; do
   done
 done
 
+# ── Colors & logging (shared) ─────────────────────────────────
+source "${SCRIPT_DIR}/colors.sh"
+
 # ── Service colors (semantic per-category shades) ────────────
 # Services=blue, Clients=green, Bots=yellow. Red is errors only.
 # Shades rotate within each category for visual differentiation.
@@ -104,8 +107,7 @@ for arg in "$@"; do
   esac
 done
 
-# ── Colors & logging (shared) ─────────────────────────────────
-source "${SCRIPT_DIR}/colors.sh"
+
 
 # ── Service filter ────────────────────────────────────────────
 should_deploy() {
