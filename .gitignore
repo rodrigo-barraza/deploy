@@ -1,2 +1,5 @@
 # Deploy logs
 .deploy-logs/
+
+# Deploy secrets (real values — use .env.deploy.example as template)
+.env.deploy
