@@ -26,6 +26,13 @@
 #   npm run deploy -- --only=prism-service,prism-client  # deploy specific services
 #   npm run deploy -- --skip=lupos-bot,lights-service  # skip specific services
 #   npm run deploy -- --no-parallel        # disable parallel builds
+#
+# Group deploy (by category):
+#   npm run deploy -- --clients            # deploy all *-client services
+#   npm run deploy -- --services           # deploy all *-service services (excl. vault)
+#   npm run deploy -- --bots               # deploy all *-bot services
+#   npm run deploy -- --vault              # deploy vault-service only
+#   npm run deploy -- --group=client,bot   # deploy clients + bots
 # ============================================================
 
 set -euo pipefail
@@ -94,6 +101,7 @@ NO_PARALLEL=false
 ONLY=""
 SKIP_LIST=""
 CHANGED_ONLY=false
+GROUP=""
 
 for arg in "$@"; do
   case "$arg" in
@@ -104,6 +112,11 @@ for arg in "$@"; do
     --changed-only)   CHANGED_ONLY=true ;;
     --only=*)         ONLY="${arg#--only=}" ;;
     --skip=*)         SKIP_LIST="${arg#--skip=}" ;;
+    --group=*)        GROUP="${arg#--group=}" ;;
+    --clients)        GROUP="${GROUP:+${GROUP},}client" ;;
+    --services)       GROUP="${GROUP:+${GROUP},}service" ;;
+    --bots)           GROUP="${GROUP:+${GROUP},}bot" ;;
+    --vault)          GROUP="${GROUP:+${GROUP},}vault" ;;
   esac
 done
 
@@ -112,6 +125,23 @@ done
 # ── Service filter ────────────────────────────────────────────
 should_deploy() {
   local svc="$1"
+
+  # --group filter: if set, service must match one of the categories
+  # Categories: "service", "client", "bot", "vault" (vault-service specifically)
+  if [ -n "$GROUP" ]; then
+    local svc_cat
+    svc_cat=$(svc_category "$svc")
+    local match=false
+    IFS=',' read -ra groups <<< "$GROUP"
+    for g in "${groups[@]}"; do
+      case "$g" in
+        vault)   [ "$svc" = "vault-service" ] && match=true ;;
+        service) [ "$svc_cat" = "service" ] && [ "$svc" != "vault-service" ] && match=true ;;
+        *)       [ "$svc_cat" = "$g" ] && match=true ;;
+      esac
+    done
+    $match || return 1
+  fi
 
   # --only filter: if set, service must be in the list
   if [ -n "$ONLY" ]; then
@@ -468,6 +498,9 @@ printf '%s%s  🚀  Deploy All Services%s\n' "$MAGENTA" "$BOLD" "$RESET"
 printf '  %sTwo-phase pipeline: build all → deploy in order%s\n' "$DIM" "$RESET"
 if $DRY_RUN; then
   printf '%s%s  ⚠  DRY RUN — no changes will be made%s\n' "$YELLOW" "$BOLD" "$RESET"
+fi
+if [ -n "$GROUP" ]; then
+  printf '  %sGroup: %s%s\n' "$CYAN" "$GROUP" "$RESET"
 fi
 if [ -n "$ONLY" ]; then
   printf '  %sOnly: %s%s\n' "$CYAN" "$ONLY" "$RESET"
