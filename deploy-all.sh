@@ -641,7 +641,15 @@ for svc in "${ALL_SERVICES[@]}"; do
   svc_clr="${SVC_COLORS[$svc]:-$DIM}"
   case "$local_status" in
     OK)   printf '  %s✔ %s%s\n' "$svc_clr" "$svc" "$RESET"; PASS=$((PASS + 1)) ;;
-    FAIL) printf '  %s✖ %s%s  →  %s\n' "$RED" "$svc" "$RESET" "${LOG_DIR}/${svc}.deploy.log"; FAILED=$((FAILED + 1)) ;;
+    FAIL)
+      # Show build log if deploy log doesn't exist (failure was in build phase)
+      if [ -f "${LOG_DIR}/${svc}.deploy.log" ]; then
+        printf '  %s✖ %s%s  →  %s\n' "$RED" "$svc" "$RESET" "${LOG_DIR}/${svc}.deploy.log"
+      else
+        printf '  %s✖ %s%s  →  %s %s(build failed)%s\n' "$RED" "$svc" "$RESET" "${LOG_DIR}/${svc}.build.log" "$DIM" "$RESET"
+      fi
+      FAILED=$((FAILED + 1))
+      ;;
     *)    printf '  %s⊘ %s (skipped)%s\n' "$DIM" "$svc" "$RESET"; SKIPPED=$((SKIPPED + 1)) ;;
   esac
 done
