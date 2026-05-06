@@ -147,7 +147,22 @@ if ! $DEPLOY_ONLY; then
     info "Skipping git pull (--skip-pull)"
   fi
 
-  # ── 1.5 Run Tests ───────────────────────────────────────────
+  # ── 1.5 Lockfile sync ──────────────────────────────────────
+  # If package-lock.json exists but is out of sync with package.json,
+  # regenerate it and auto-commit. This prevents npm ci failures inside
+  # Docker when dependencies are added/renamed/removed without re-locking.
+  if [ -f "package-lock.json" ] && ! $DRY_RUN; then
+    if ! npm ci --dry-run 2>/dev/null 1>/dev/null; then
+      step "Lockfile out of sync — regenerating"
+      npm install --package-lock-only 2>&1 | tail -3 | sed 's/^/  /'
+      git add package-lock.json
+      git commit -m "chore: regenerate package-lock.json" --no-verify 2>&1 | sed 's/^/  /'
+      GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+      ok "Lockfile synced (now at ${GIT_SHA})"
+    fi
+  fi
+
+  # ── 1.6 Run Tests ───────────────────────────────────────────
   if grep -q '"test":' package.json 2>/dev/null; then
     step "Running Tests"
     if $DRY_RUN; then
