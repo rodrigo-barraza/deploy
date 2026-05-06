@@ -13,26 +13,6 @@
     "deploy:vault": "bash deploy-all.sh --vault",
     "cleanup": "bash cleanup-local-images.sh",
     "cleanup:force": "bash cleanup-local-images.sh --force",
-    "deploy:sync": "bash sync-deploy-scripts.sh",
-    "deploy:vault-service": "bash ../vault-service/deploy.sh",
-    "deploy:tools-service": "bash ../tools-service/deploy.sh",
-    "deploy:portal-service": "bash ../portal-service/deploy.sh",
-    "deploy:lights-service": "bash ../lights-service/deploy.sh",
-    "deploy:clock-crew-service": "bash ../clock-crew-service/deploy.sh",
-    "deploy:messages-service": "bash ../messages-service/deploy.sh",
-    "deploy:ledger-service": "bash ../ledger-service/deploy.sh",
-    "deploy:sessions": "bash ../sessions/deploy.sh",
-    "deploy:prism-service": "bash ../prism-service/deploy.sh",
-
-    "deploy:prism-client": "bash ../prism-client/deploy.sh",
-    "deploy:portal-client": "bash ../portal-client/deploy.sh",
-    "deploy:clock-crew-client": "bash ../clock-crew-client/deploy.sh",
-    "deploy:messages-client": "bash ../messages-client/deploy.sh",
-    "deploy:lights-client": "bash ../lights-client/deploy.sh",
-    "deploy:rod-dev-client": "bash ../rod-dev-client/deploy.sh",
-    "deploy:lupos-bot": "bash ../lupos-bot/deploy.sh",
-    "deploy:meepothegeomancer-client": "bash ../meepothegeomancer-client/deploy.sh",
-    "deploy:classic-whitemane-client": "bash ../classic-whitemane-client/deploy.sh",
-    "deploy:ledger-client": "bash ../ledger-client/deploy.sh"
+    "deploy:sync": "bash sync-deploy-scripts.sh"
   }
 }
