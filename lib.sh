@@ -149,14 +149,28 @@ if ! $DEPLOY_ONLY; then
 
   # ── 1.5 Lockfile sync ──────────────────────────────────────
   # Ensure package-lock.json and node_modules are in sync with
-  # package.json. We run a full `npm install` (not just
-  # --package-lock-only) so that node_modules are also updated
-  # for the test step (1.6) that runs before Docker build.
-  # --ignore-scripts skips postinstall hooks for speed/safety.
+  # package.json. Git-based dependencies (git+https://...) are
+  # pinned by SHA in the lockfile — `npm install` alone won't
+  # re-resolve them. We first run `npm update` on any git deps
+  # to pull the latest commit, then a full install to reconcile.
   # If the lockfile changed, auto-commit so Docker gets the fix.
   if [ -f "package-lock.json" ] && ! $DRY_RUN; then
     step "Syncing dependencies"
-    npm install --ignore-scripts 2>&1 | tail -5 | sed 's/^/  /'
+
+    # Force re-resolve git-based deps (lockfile pins stale SHAs)
+    GIT_DEPS=$(node -e "
+      const p = require('./package.json');
+      const all = { ...p.dependencies, ...p.devDependencies };
+      const git = Object.keys(all).filter(k => /^git\\+/.test(all[k]));
+      if (git.length) console.log(git.join(' '));
+    " 2>/dev/null || true)
+    if [ -n "$GIT_DEPS" ]; then
+      info "Updating git deps: ${GIT_DEPS}"
+      npm update $GIT_DEPS 2>&1 | tail -3 | sed 's/^/  /'
+    fi
+
+    npm install --ignore-scripts 2>&1 | tail -3 | sed 's/^/  /'
+
     if ! git diff --quiet package-lock.json 2>/dev/null; then
       step "Lockfile was out of sync — committing fix"
       git add package-lock.json
