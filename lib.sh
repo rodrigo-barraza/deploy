@@ -148,13 +148,16 @@ if ! $DEPLOY_ONLY; then
   fi
 
   # ── 1.5 Lockfile sync ──────────────────────────────────────
-  # If package-lock.json exists but is out of sync with package.json,
-  # regenerate it and auto-commit. This prevents npm ci failures inside
-  # Docker when dependencies are added/renamed/removed without re-locking.
+  # Regenerate package-lock.json if it drifted from package.json.
+  # Instead of the slow `npm ci --dry-run` probe, we run
+  # `npm install --package-lock-only` (fast — no node_modules touched)
+  # and check whether the lockfile actually changed via git diff.
+  # This catches all desync cases: added/removed deps, git-URL
+  # bumps, and registry version changes.
   if [ -f "package-lock.json" ] && ! $DRY_RUN; then
-    if ! npm ci --dry-run 2>/dev/null 1>/dev/null; then
-      step "Lockfile out of sync — regenerating"
-      npm install --package-lock-only 2>&1 | tail -3 | sed 's/^/  /'
+    npm install --package-lock-only --ignore-scripts 2>&1 | tail -3 | sed 's/^/  /'
+    if ! git diff --quiet package-lock.json 2>/dev/null; then
+      step "Lockfile was out of sync — committing fix"
       git add package-lock.json
       git commit -m "chore: regenerate package-lock.json" --no-verify 2>&1 | sed 's/^/  /'
       GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
