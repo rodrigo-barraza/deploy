@@ -48,6 +48,17 @@ BUILD_EXTRA_FLAGS="${BUILD_EXTRA_FLAGS:-}"
 BUILD_TAIL_LINES="${BUILD_TAIL_LINES:-5}"
 SKIP_ENV_DEPLOY="${SKIP_ENV_DEPLOY:-false}"
 
+# ── SSH agent (for --ssh default in docker build) ─────────────
+# BuildKit forwards the host SSH agent into RUN --mount=type=ssh
+# layers so npm/git can authenticate to private GitHub repos.
+if [ -z "${SSH_AUTH_SOCK:-}" ]; then
+  eval "$(ssh-agent -s)" > /dev/null 2>&1
+  _STARTED_SSH_AGENT=true
+fi
+if ! ssh-add -l > /dev/null 2>&1; then
+  ssh-add 2> /dev/null || true
+fi
+
 # ── Compression ───────────────────────────────────────────────
 # Prefer pigz (parallel gzip) for 3-5x faster image compression
 if command -v pigz &>/dev/null; then
@@ -171,11 +182,8 @@ if ! $DEPLOY_ONLY; then
 
     npm install --ignore-scripts 2>&1 | tail -3 | sed 's/^/  /'
 
-    # npm resolves git deps to git+ssh:// when local SSH keys exist,
-    # but Docker containers don't have SSH keys — normalise to HTTPS.
-    if grep -q 'git+ssh://git@github.com/' package-lock.json 2>/dev/null; then
-      sed -i 's|git+ssh://git@github.com/|git+https://github.com/|g' package-lock.json
-    fi
+    # No URL rewriting needed — Docker build uses --ssh default
+    # to forward the host SSH agent for private git deps.
 
     if ! git diff --quiet package-lock.json 2>/dev/null; then
       step "Lockfile was out of sync — committing fix"
@@ -221,6 +229,7 @@ if ! $DEPLOY_ONLY; then
     # Run with pipefail in a subshell so tail/sed don't swallow build failures
     set +e
     (set -o pipefail; DOCKER_BUILDKIT=1 docker build \
+      --ssh default \
       $NO_CACHE \
       $BUILD_EXTRA_FLAGS \
       $BUILD_ARGS \
