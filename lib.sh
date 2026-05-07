@@ -171,6 +171,12 @@ if ! $DEPLOY_ONLY; then
 
     npm install --ignore-scripts 2>&1 | tail -3 | sed 's/^/  /'
 
+    # npm resolves git deps to git+ssh:// when local SSH keys exist,
+    # but Docker containers don't have SSH keys — normalise to HTTPS.
+    if grep -q 'git+ssh://git@github.com/' package-lock.json 2>/dev/null; then
+      sed -i 's|git+ssh://git@github.com/|git+https://github.com/|g' package-lock.json
+    fi
+
     if ! git diff --quiet package-lock.json 2>/dev/null; then
       step "Lockfile was out of sync — committing fix"
       git add package-lock.json
