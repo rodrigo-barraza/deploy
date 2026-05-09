@@ -11,7 +11,7 @@
 #             before deploying (earlier tiers may deploy while
 #             later tiers are still building).
 #
-# Tiers are auto-derived from vault-service/services.json:
+# Tiers are auto-derived from vault-service/projects.json:
 #   0. Foundation   — secret store (must be up first)
 #   1. APIs         — backend services
 #   2. Mid-tier     — services depending on tier-1
@@ -41,15 +41,15 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"   # sun/ parent directory
 LOG_DIR="${SCRIPT_DIR}/.deploy-logs"
-SERVICES_JSON="${ROOT_DIR}/vault-service/services.json"
+PROJECTS_JSON="${ROOT_DIR}/vault-service/projects.json"
 
-# ── Verify services.json ──────────────────────────────────────
-if [ ! -f "$SERVICES_JSON" ]; then
-  echo "ERROR: services.json not found at ${SERVICES_JSON}" >&2
+# ── Verify projects.json ──────────────────────────────────────
+if [ ! -f "$PROJECTS_JSON" ]; then
+  echo "ERROR: projects.json not found at ${PROJECTS_JSON}" >&2
   exit 1
 fi
 
-# ── Dynamically load tiers from services.json ─────────────────
+# ── Dynamically load tiers from projects.json ─────────────────
 # Uses Node.js (always available) to parse JSON and emit bash-eval
 # assignments: MAX_TIER, TIER_SERVICES[n], TIER_<n> arrays,
 # and SVC_HEALTH_URL[id] for health-gating between tiers.
@@ -58,10 +58,10 @@ declare -A TIER_SERVICES  # tier -> space-separated service IDs
 declare -A SVC_HEALTH_URL # service-id -> health check URL
 
 eval "$(node -e "
-  const s = require('$SERVICES_JSON');
+  const s = require('$PROJECTS_JSON');
   const host = s.defaultHost || 'localhost';
   const tiers = {};
-  for (const svc of s.services) {
+  for (const svc of s.projects) {
     (tiers[svc.deployTier] ??= []).push(svc.id);
     if (svc.port && svc.healthPath) {
       console.log('SVC_HEALTH_URL[' + svc.id + ']=\"http://' + host + ':' + svc.port + svc.healthPath + '\"');

@@ -2,7 +2,7 @@
 # ============================================================
 # Deploy Kit — Sync Deploy Scripts
 #
-# Reads vault-service/services.json and regenerates the
+# Reads vault-service/projects.json and regenerates the
 # deploy:* entries in package.json so individual deploy
 # shortcuts stay in sync automatically.
 #
@@ -14,22 +14,22 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-SERVICES_JSON="${ROOT_DIR}/vault-service/services.json"
+PROJECTS_JSON="${ROOT_DIR}/vault-service/projects.json"
 PACKAGE_JSON="${SCRIPT_DIR}/package.json"
 
 source "${SCRIPT_DIR}/colors.sh"
 
-if [ ! -f "$SERVICES_JSON" ]; then
-  echo "ERROR: services.json not found at ${SERVICES_JSON}" >&2
+if [ ! -f "$PROJECTS_JSON" ]; then
+  echo "ERROR: projects.json not found at ${PROJECTS_JSON}" >&2
   exit 1
 fi
 
-step "Syncing deploy shortcuts from services.json"
+step "Syncing deploy shortcuts from projects.json"
 
 node -e "
   const fs = require('fs');
-  const services = require('${SERVICES_JSON}');
-  const ids = services.services.map(s => s.id).sort();
+  const services = require('${PROJECTS_JSON}');
+  const ids = services.projects.map(s => s.id).sort();
 
   const scripts = {
     'deploy':        'bash deploy-all.sh',
@@ -53,4 +53,4 @@ node -e "
 "
 
 echo ""
-ok "Done — package.json is in sync with services.json"
+ok "Done — package.json is in sync with projects.json"
