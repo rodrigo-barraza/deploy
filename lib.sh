@@ -59,6 +59,21 @@ if ! ssh-add -l > /dev/null 2>&1; then
   ssh-add 2> /dev/null || true
 fi
 
+# ── BuildKit builder (docker-container driver) ────────────────
+# The default `docker` driver embeds BuildKit inside dockerd with
+# max-parallelism capped at ~4.  A `docker-container` builder runs
+# BuildKit in its own container, letting us configure unlimited
+# parallelism to saturate all available CPU cores.
+BUILDER_NAME="sun-builder"
+BUILDKIT_CONFIG="${DEPLOY_KIT_DIR}/buildkit.toml"
+if ! docker buildx inspect "$BUILDER_NAME" > /dev/null 2>&1; then
+  docker buildx create \
+    --name "$BUILDER_NAME" \
+    --driver docker-container \
+    --buildkitd-config "$BUILDKIT_CONFIG" \
+    --bootstrap > /dev/null 2>&1
+fi
+
 # ── Compression ───────────────────────────────────────────────
 # Prefer pigz (parallel gzip) for 3-5x faster image compression
 if command -v pigz &>/dev/null; then
@@ -228,7 +243,9 @@ if ! $DEPLOY_ONLY; then
     BUILD_START_INNER=$SECONDS
     # Run with pipefail in a subshell so tail/sed don't swallow build failures
     set +e
-    (set -o pipefail; DOCKER_BUILDKIT=1 docker build \
+    (set -o pipefail; docker buildx build \
+      --builder "$BUILDER_NAME" \
+      --load \
       --ssh default \
       $NO_CACHE \
       $BUILD_EXTRA_FLAGS \

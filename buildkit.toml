@@ -1,0 +1,30 @@
+# ============================================================
+# BuildKit Daemon Configuration
+# ============================================================
+# Used by the `sun-builder` docker-container builder to maximize
+# CPU utilization during Docker image builds.
+#
+# The default `docker` driver limits parallelism to ~4 concurrent
+# operations. This config unleashes all available cores.
+# ============================================================
+
+[worker.oci]
+  # Max parallel build operations (RUN, COPY, etc.)
+  # Set to 0 = unlimited (uses all available CPUs).
+  # With 32 cores, this is a massive speedup for multi-stage builds
+  # and parallel layer resolution.
+  max-parallelism = 0
+
+  # GC policies — keep build cache generous for incremental builds
+  [[worker.oci.gcpolicy]]
+    keepDuration = "168h"     # 7 days for source/exec cache
+    maxUsedSpace = "30GB"
+    filters = ["type==source.local", "type==exec.cachemount", "type==source.git.checkout"]
+
+  [[worker.oci.gcpolicy]]
+    keepDuration = "720h"     # 30 days for layer cache
+    reservedSpace = "30GB"
+
+  [[worker.oci.gcpolicy]]
+    all = true
+    reservedSpace = "20GB"
