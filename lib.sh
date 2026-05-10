@@ -46,6 +46,7 @@ BUILD_ARGS="${BUILD_ARGS:-}"
 BUILD_SECRETS="${BUILD_SECRETS:-}"
 BUILD_EXTRA_FLAGS="${BUILD_EXTRA_FLAGS:-}"
 BUILD_TAIL_LINES="${BUILD_TAIL_LINES:-5}"
+BUILD_TIMEOUT="${BUILD_TIMEOUT:-600}"
 SKIP_ENV_DEPLOY="${SKIP_ENV_DEPLOY:-false}"
 
 # ── SSH agent (for --ssh default in docker build) ─────────────
@@ -59,20 +60,12 @@ if ! ssh-add -l > /dev/null 2>&1; then
   ssh-add 2> /dev/null || true
 fi
 
-# ── BuildKit builder (docker-container driver) ────────────────
-# The default `docker` driver embeds BuildKit inside dockerd with
-# max-parallelism capped at ~4.  A `docker-container` builder runs
-# BuildKit in its own container, letting us configure unlimited
-# parallelism to saturate all available CPU cores.
-BUILDER_NAME="deploy-builder"
-BUILDKIT_CONFIG="${DEPLOY_KIT_DIR}/buildkit.toml"
-if ! docker buildx inspect "$BUILDER_NAME" > /dev/null 2>&1; then
-  docker buildx create \
-    --name "$BUILDER_NAME" \
-    --driver docker-container \
-    --buildkitd-config "$BUILDKIT_CONFIG" \
-    --bootstrap > /dev/null 2>&1
-fi
+# ── BuildKit (default driver) ─────────────────────────────────
+# Docker 23+ embeds BuildKit directly in dockerd. The default
+# `docker` driver supports all BuildKit features (--ssh, --mount,
+# multi-stage, --secret) without a separate sidecar container.
+# This avoids the daemon saturation and silent hangs caused by
+# the docker-container driver under heavy parallel builds.
 
 # ── Compression ───────────────────────────────────────────────
 # Prefer pigz (parallel gzip) for 3-5x faster image compression
@@ -241,10 +234,11 @@ if ! $DEPLOY_ONLY; then
     info "(skipped — dry run)"
   else
     BUILD_START_INNER=$SECONDS
-    # Run with pipefail in a subshell so tail/sed don't swallow build failures
+    # Run with pipefail in a subshell so tail/sed don't swallow build failures.
+    # timeout is a safety net — sends SIGTERM, then SIGKILL after 30s.
     set +e
-    (set -o pipefail; docker buildx build \
-      --builder "$BUILDER_NAME" \
+    (set -o pipefail; timeout --kill-after=30 "${BUILD_TIMEOUT}" \
+      docker buildx build \
       --load \
       --ssh default \
       $NO_CACHE \
@@ -260,7 +254,11 @@ if ! $DEPLOY_ONLY; then
     BUILD_EXIT=$?
     set -e
     if [ "$BUILD_EXIT" -ne 0 ]; then
-      fail "Build failed (exit ${BUILD_EXIT}) in $((SECONDS - BUILD_START_INNER))s"
+      if [ "$BUILD_EXIT" -eq 124 ] || [ "$BUILD_EXIT" -eq 137 ]; then
+        fail "Build timed out after ${BUILD_TIMEOUT}s"
+      else
+        fail "Build failed (exit ${BUILD_EXIT}) in $((SECONDS - BUILD_START_INNER))s"
+      fi
       exit 1
     fi
     ok "Built in $((SECONDS - BUILD_START_INNER))s"

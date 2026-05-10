@@ -118,7 +118,7 @@ ONLY=""
 SKIP_LIST=""
 CHANGED_ONLY=false
 GROUP=""
-MAX_CONCURRENT_BUILDS=4   # BuildKit semaphore — prevent daemon saturation
+MAX_CONCURRENT_BUILDS=4   # Limit concurrent docker builds to prevent I/O saturation
 
 for arg in "$@"; do
   case "$arg" in
@@ -258,8 +258,8 @@ deploy_service() { run_phase "$1" "$2" "deploy" "--deploy-only"; }
 
 # ── Build concurrency semaphore ───────────────────────────────
 # Uses a FIFO pipe as a counting semaphore to cap the number of
-# simultaneous docker-buildx processes hitting the BuildKit daemon.
-# Without this, 25+ concurrent builds deadlock the single worker.
+# simultaneous docker builds to prevent CPU and I/O saturation.
+# Without this, 25+ concurrent builds can overwhelm the system.
 SEM_FIFO="${LOG_DIR}/.build-semaphore"
 
 init_semaphore() {
