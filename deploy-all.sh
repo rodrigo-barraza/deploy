@@ -43,6 +43,17 @@ ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"   # sun/ parent directory
 LOG_DIR="${SCRIPT_DIR}/.deploy-logs"
 PROJECTS_JSON="${ROOT_DIR}/vault-service/projects.json"
 
+# ── SSH agent (for BuildKit --ssh default in docker build) ────
+# Child deploy.sh processes need SSH_AUTH_SOCK to forward the
+# agent into RUN --mount=type=ssh layers for private git deps.
+if [ -z "${SSH_AUTH_SOCK:-}" ]; then
+  eval "$(ssh-agent -s)" > /dev/null 2>&1
+  export SSH_AUTH_SOCK SSH_AGENT_PID
+fi
+if ! ssh-add -l > /dev/null 2>&1; then
+  ssh-add 2> /dev/null || true
+fi
+
 # ── Verify projects.json ──────────────────────────────────────
 if [ ! -f "$PROJECTS_JSON" ]; then
   echo "ERROR: projects.json not found at ${PROJECTS_JSON}" >&2
