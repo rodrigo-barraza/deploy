@@ -39,7 +39,7 @@
 set -euo pipefail
 
 # Clean up semaphore FIFO on exit
-cleanup() { rm -f "${LOG_DIR:-.deploy-logs}/.build-semaphore" 2>/dev/null; }
+cleanup() { exec 7>&- 2>/dev/null; rm -f "${LOG_DIR:-.deploy-logs}/.build-semaphore" 2>/dev/null; }
 trap cleanup EXIT
 
 # ── Config ────────────────────────────────────────────────────
@@ -265,15 +265,19 @@ SEM_FIFO="${LOG_DIR}/.build-semaphore"
 init_semaphore() {
   rm -f "$SEM_FIFO"
   mkfifo "$SEM_FIFO"
+  # Open a persistent read-write FD on the FIFO. This prevents EOF
+  # on readers — without a writer always open, readers past the
+  # initial token count get EOF and die under set -e.
+  exec 7<>"$SEM_FIFO"
   # Pre-fill with N tokens
   local i
   for ((i = 0; i < MAX_CONCURRENT_BUILDS; i++)); do
-    echo "x" >"$SEM_FIFO" &
+    echo "x" >&7
   done
 }
 
-sem_acquire() { read -r < "$SEM_FIFO"; }
-sem_release() { echo "x" > "$SEM_FIFO"; }
+sem_acquire() { read -r <&7; }
+sem_release() { echo "x" >&7; }
 
 # Wrapper: acquire semaphore → build → release
 build_service_throttled() {
