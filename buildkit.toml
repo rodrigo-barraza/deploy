@@ -1,7 +1,7 @@
 # ============================================================
 # BuildKit Daemon Configuration
 # ============================================================
-# Used by the `sun-builder` docker-container builder to maximize
+# Used by the `deploy-builder` docker-container builder to maximize
 # CPU utilization during Docker image builds.
 #
 # The default `docker` driver limits parallelism to ~4 concurrent

@@ -64,7 +64,7 @@ fi
 # max-parallelism capped at ~4.  A `docker-container` builder runs
 # BuildKit in its own container, letting us configure unlimited
 # parallelism to saturate all available CPU cores.
-BUILDER_NAME="sun-builder"
+BUILDER_NAME="deploy-builder"
 BUILDKIT_CONFIG="${DEPLOY_KIT_DIR}/buildkit.toml"
 if ! docker buildx inspect "$BUILDER_NAME" > /dev/null 2>&1; then
   docker buildx create \
