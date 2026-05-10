@@ -26,6 +26,7 @@
 #   npm run deploy -- --only=prism-service,prism-client  # deploy specific services
 #   npm run deploy -- --skip=lupos-bot,lights-service  # skip specific services
 #   npm run deploy -- --no-parallel        # disable parallel builds
+#   npm run deploy -- --max-builds=6       # max concurrent docker builds (default: 4)
 #
 # Group deploy (by category):
 #   npm run deploy -- --clients            # deploy all *-client services
@@ -36,6 +37,10 @@
 # ============================================================
 
 set -euo pipefail
+
+# Clean up semaphore FIFO on exit
+cleanup() { rm -f "${LOG_DIR:-.deploy-logs}/.build-semaphore" 2>/dev/null; }
+trap cleanup EXIT
 
 # ── Config ────────────────────────────────────────────────────
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -113,6 +118,7 @@ ONLY=""
 SKIP_LIST=""
 CHANGED_ONLY=false
 GROUP=""
+MAX_CONCURRENT_BUILDS=4   # BuildKit semaphore — prevent daemon saturation
 
 for arg in "$@"; do
   case "$arg" in
@@ -128,6 +134,7 @@ for arg in "$@"; do
     --services)       GROUP="${GROUP:+${GROUP},}service" ;;
     --bots)           GROUP="${GROUP:+${GROUP},}bot" ;;
     --vault)          GROUP="${GROUP:+${GROUP},}vault" ;;
+    --max-builds=*)   MAX_CONCURRENT_BUILDS="${arg#--max-builds=}" ;;
   esac
 done
 
@@ -249,6 +256,34 @@ run_phase() {
 build_service()  { run_phase "$1" "$2" "build"  "--build-only";  }
 deploy_service() { run_phase "$1" "$2" "deploy" "--deploy-only"; }
 
+# ── Build concurrency semaphore ───────────────────────────────
+# Uses a FIFO pipe as a counting semaphore to cap the number of
+# simultaneous docker-buildx processes hitting the BuildKit daemon.
+# Without this, 25+ concurrent builds deadlock the single worker.
+SEM_FIFO="${LOG_DIR}/.build-semaphore"
+
+init_semaphore() {
+  rm -f "$SEM_FIFO"
+  mkfifo "$SEM_FIFO"
+  # Pre-fill with N tokens
+  local i
+  for ((i = 0; i < MAX_CONCURRENT_BUILDS; i++)); do
+    echo "x" >"$SEM_FIFO" &
+  done
+}
+
+sem_acquire() { read -r < "$SEM_FIFO"; }
+sem_release() { echo "x" > "$SEM_FIFO"; }
+
+# Wrapper: acquire semaphore → build → release
+build_service_throttled() {
+  local svc="$1"
+  local prefix="$2"
+  sem_acquire
+  build_service "$svc" "$prefix"
+  sem_release
+}
+
 # ── Fire builds for a tier (non-blocking) ─────────────────────
 # Launches all build jobs as background processes and stores PIDs.
 # Does NOT wait — returns immediately so the next tier can fire too.
@@ -295,9 +330,9 @@ fire_builds() {
       fi
     done
   else
-    # Parallel mode: fire all as background jobs
+    # Parallel mode: throttled by semaphore (max $MAX_CONCURRENT_BUILDS)
     for svc in "${filtered[@]}"; do
-      build_service "$svc" "true" &
+      build_service_throttled "$svc" "true" &
       echo "$!" > "${LOG_DIR}/${svc}.build.pid"
       info "  ⟶ ${svc} (PID $!)"
     done
@@ -526,7 +561,12 @@ printf '%s%s══════════════════════�
 
 # ── Prepare log directory ─────────────────────────────────────
 mkdir -p "$LOG_DIR"
-rm -f "${LOG_DIR}"/*.log "${LOG_DIR}"/*.status "${LOG_DIR}"/*.pid 2>/dev/null
+rm -f "${LOG_DIR}"/*.log "${LOG_DIR}"/*.status "${LOG_DIR}"/*.pid "${LOG_DIR}"/.build-semaphore 2>/dev/null
+
+# Initialize build concurrency semaphore
+if ! $NO_PARALLEL; then
+  init_semaphore
+fi
 
 # ── Validate all services have deploy.sh ──────────────────────
 step "Pre-flight check"
