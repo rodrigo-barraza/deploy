@@ -23,6 +23,8 @@
     "deploy:dygest-service": "bash ../dygest-service/deploy.sh",
     "deploy:gauge-client": "bash ../gauge-client/deploy.sh",
     "deploy:gauge-service": "bash ../gauge-service/deploy.sh",
+    "deploy:iron-client": "bash ../iron-client/deploy.sh",
+    "deploy:iron-service": "bash ../iron-service/deploy.sh",
     "deploy:ledger-client": "bash ../ledger-client/deploy.sh",
     "deploy:ledger-service": "bash ../ledger-service/deploy.sh",
     "deploy:lights-client": "bash ../lights-client/deploy.sh",
