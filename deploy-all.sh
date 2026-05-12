@@ -78,6 +78,7 @@ eval "$(node -e "
   const host = s.defaultHost || 'localhost';
   const tiers = {};
   for (const svc of s.projects) {
+    if (typeof svc.deployTier !== 'number') continue;
     (tiers[svc.deployTier] ??= []).push(svc.id);
     if (svc.port && svc.healthPath) {
       console.log('SVC_HEALTH_URL[' + svc.id + ']=\"http://' + host + ':' + svc.port + svc.healthPath + '\"');
