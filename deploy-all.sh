@@ -39,7 +39,7 @@
 set -euo pipefail
 
 # Clean up semaphore FIFO on exit
-cleanup() { exec 7>&- 2>/dev/null; rm -f "${LOG_DIR:-.deploy-logs}/.build-semaphore" 2>/dev/null; }
+cleanup() { exec 7>&- 2>/dev/null; rm -f "${LOG_DIR:-.deploy-logs}/.build-semaphore" 2>/dev/null; rm -rf "${LOG_DIR:-.deploy-logs}"/.health-* 2>/dev/null; }
 trap cleanup EXIT
 
 # ── Config ────────────────────────────────────────────────────
@@ -486,8 +486,12 @@ deploy_tier() {
 # After deploying a tier, poll health endpoints until all services
 # respond 2xx or timeout. Prevents boot-order races where later
 # tiers start before their dependencies are ready.
-HEALTH_GATE_TIMEOUT=60    # seconds per service
-HEALTH_GATE_INTERVAL=3    # seconds between polls
+#
+# All services are polled CONCURRENTLY in a single loop so the
+# timeout applies to the whole tier (worst case 60s total), not
+# per-service (which was N × 60s sequential).
+HEALTH_GATE_TIMEOUT=60    # seconds for the entire tier
+HEALTH_GATE_INTERVAL=3    # seconds between poll rounds
 
 wait_tier_healthy() {
   local tier_name="$1"
@@ -510,27 +514,53 @@ wait_tier_healthy() {
 
   step "Health gate — waiting for ${tier_name} services to become healthy"
 
-  local all_healthy=true
+  # Track which services are still pending
+  declare -A pending
   for svc in "${to_check[@]}"; do
-    local url="${SVC_HEALTH_URL[$svc]}"
-    local elapsed=0
-    local healthy=false
+    pending[$svc]=1
+  done
 
-    while [ $elapsed -lt $HEALTH_GATE_TIMEOUT ]; do
-      if curl -sf --max-time 5 -o /dev/null "$url" 2>/dev/null; then
-        healthy=true
-        break
+  local elapsed=0
+  local all_healthy=true
+
+  while [ ${#pending[@]} -gt 0 ] && [ $elapsed -lt $HEALTH_GATE_TIMEOUT ]; do
+    # Fire all health checks in parallel (background curl per service)
+    local check_dir
+    check_dir=$(mktemp -d "${LOG_DIR}/.health-XXXXXX")
+    for svc in "${!pending[@]}"; do
+      local url="${SVC_HEALTH_URL[$svc]}"
+      ( curl -sf --max-time 3 -o /dev/null "$url" 2>/dev/null && echo "OK" > "${check_dir}/${svc}" ) &
+    done
+    wait  # wait for all background curls
+
+    # Collect results
+    local newly_healthy=()
+    for svc in "${!pending[@]}"; do
+      if [ -f "${check_dir}/${svc}" ]; then
+        newly_healthy+=("$svc")
       fi
-      sleep $HEALTH_GATE_INTERVAL
-      elapsed=$((elapsed + HEALTH_GATE_INTERVAL))
+    done
+    rm -rf "$check_dir"
+
+    # Remove healthy services from the pending set
+    for svc in "${newly_healthy[@]}"; do
+      ok "${svc} healthy (${SVC_HEALTH_URL[$svc]})"
+      unset "pending[$svc]"
     done
 
-    if $healthy; then
-      ok "${svc} healthy (${url})"
-    else
-      warn "${svc} not healthy after ${HEALTH_GATE_TIMEOUT}s — proceeding anyway"
-      all_healthy=false
+    # If all healthy, we're done
+    if [ ${#pending[@]} -eq 0 ]; then
+      break
     fi
+
+    sleep $HEALTH_GATE_INTERVAL
+    elapsed=$((elapsed + HEALTH_GATE_INTERVAL))
+  done
+
+  # Report any services that never became healthy
+  for svc in "${!pending[@]}"; do
+    warn "${svc} not healthy after ${HEALTH_GATE_TIMEOUT}s — proceeding anyway"
+    all_healthy=false
   done
 
   if $all_healthy; then
