@@ -107,3 +107,129 @@ Services with special needs define functions before sourcing:
 | `BUILD_EXTRA_FLAGS` | ❌ | `""` | Extra Docker build flags (e.g. `--network=host`) |
 | `BUILD_TAIL_LINES` | ❌ | `5` | Lines of build output to show |
 | `SKIP_ENV_DEPLOY` | ❌ | `false` | Skip `.env.deploy` validation |
+
+## Multi-Device Deployment
+
+Services can deploy to different devices. Configuration lives in `vault-service/projects.json` (single source of truth).
+
+### How It Works
+
+Each project can specify a `deployTarget` device ID (defaults to `"synology"`):
+
+```json
+{
+  "id": "reels-service",
+  "deployTarget": "workstation2"
+}
+```
+
+Each device in the `devices` array declares its deploy method:
+
+```json
+{
+  "id": "workstation2",
+  "dockerApi": "tcp://192.168.86.178:2375",
+  "deploy": { "method": "docker-api" }
+}
+```
+
+```json
+{
+  "id": "synology",
+  "sshAlias": "nas",
+  "deploy": {
+    "method": "ssh",
+    "composeRoot": "/volume1/docker",
+    "smbRoot": "/mnt/k"
+  }
+}
+```
+
+### Deploy Methods
+
+| Method | How | Used For |
+|---|---|---|
+| `ssh` | Pipe image over SSH, copy compose + env, restart remotely | Synology NAS (default) |
+| `docker-api` | Pipe image via `docker -H`, run compose locally with `DOCKER_HOST` | Windows machines with Docker Desktop |
+
+### Compose Override Files
+
+Services with device-specific config (e.g. volume paths) use compose file stacking. Place a `docker-compose.{deviceId}.yml` in the service directory:
+
+```yaml
+# reels-service/docker-compose.workstation2.yml
+services:
+  reels-service:
+    user: ""
+    volumes:
+      - D:/media:/media:ro
+```
+
+This is automatically detected and stacked on top of the base `docker-compose.yml` during deploy.
+
+### Adding a New Device Target
+
+1. Add the device to `projects.json` → `devices[]` with a `deploy` config
+2. Set `deployTarget` on any project that should deploy there
+3. Optionally create `docker-compose.{deviceId}.yml` overrides in service directories
+
+---
+
+## Setting Up Docker TCP API on Windows
+
+Required for any Windows machine used as a `docker-api` deploy target.
+
+### 1. Enable TCP in Docker Desktop
+
+**Docker Desktop → Settings → General → ✅ "Expose daemon on tcp://localhost:2375 without TLS"**
+
+> ⚠️ **Do NOT** set `hosts` in `daemon.json` — Docker Desktop passes its own `-H` flag internally, which conflicts and prevents the engine from starting.
+
+Verify it works locally:
+
+```powershell
+docker -H tcp://127.0.0.1:2375 version
+```
+
+### 2. Expose on LAN via Port Proxy
+
+Docker Desktop only binds to `localhost`. Use `netsh portproxy` to forward the LAN IP to localhost (PowerShell as Admin):
+
+```powershell
+netsh interface portproxy add v4tov4 listenport=2375 listenaddress=<LAN_IP> connectport=2375 connectaddress=127.0.0.1
+```
+
+> ⚠️ **Use the specific LAN IP**, not `0.0.0.0`. Binding to all interfaces steals the port from Docker Desktop's own `127.0.0.1` listener.
+
+### 3. Allow Through Firewall
+
+```powershell
+New-NetFirewallRule -DisplayName "Docker TCP API" -Direction Inbound -Protocol TCP -LocalPort 2375 -Action Allow
+```
+
+### 4. Restart IP Helper
+
+The `netsh portproxy` relay depends on the IP Helper service:
+
+```powershell
+Restart-Service iphlpsvc
+```
+
+### 5. Verify Cross-Machine
+
+From any other machine on the LAN:
+
+```bash
+docker -H tcp://<LAN_IP>:2375 version
+```
+
+Both Client and Server sections should appear. API version auto-negotiation (`downgraded from X.XX`) is normal and harmless.
+
+### Troubleshooting
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| `Docker Engine stopped` | `hosts` in `daemon.json` | Remove `hosts`, use Docker Desktop TCP checkbox instead |
+| `EOF` on connect | Port proxy on `0.0.0.0` stealing the port | Rebind to specific LAN IP |
+| `Cannot connect` after adding proxy | IP Helper not restarted | `Restart-Service iphlpsvc` |
+| API version mismatch warning | Different Docker versions | Normal — auto-negotiated, no action needed |

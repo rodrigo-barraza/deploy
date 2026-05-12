@@ -72,16 +72,52 @@ fi
 ALL_SERVICES=()
 declare -A TIER_SERVICES  # tier -> space-separated service IDs
 declare -A SVC_HEALTH_URL # service-id -> health check URL
+declare -A SVC_DEPLOY_TARGET  # service-id -> device ID
+
+# Device metadata (populated from projects.json devices array)
+declare -A DEVICE_METHOD      # device-id -> ssh | docker-api
+declare -A DEVICE_HOSTNAME    # device-id -> IP/hostname
+declare -A DEVICE_SSH_ALIAS   # device-id -> SSH config alias
+declare -A DEVICE_DOCKER_BIN  # device-id -> path to docker binary
+declare -A DEVICE_DOCKER_API  # device-id -> tcp://host:port
+declare -A DEVICE_COMPOSE_ROOT # device-id -> remote compose dir root
+declare -A DEVICE_SMB_ROOT    # device-id -> SMB mount path
 
 eval "$(node -e "
   const s = require('$PROJECTS_JSON');
   const host = s.defaultHost || 'localhost';
+
+  // Build device lookup
+  const devices = {};
+  for (const d of (s.devices || [])) devices[d.id] = d;
+  const defaultTarget = 'synology';
+
+  // Emit device deploy metadata
+  for (const d of (s.devices || [])) {
+    const dep = d.deploy || {};
+    const method = dep.method || 'ssh';
+    console.log('DEVICE_METHOD[' + d.id + ']=\"' + method + '\"');
+    console.log('DEVICE_HOSTNAME[' + d.id + ']=\"' + (d.hostname || '') + '\"');
+    console.log('DEVICE_SSH_ALIAS[' + d.id + ']=\"' + (d.sshAlias || '') + '\"');
+    console.log('DEVICE_DOCKER_BIN[' + d.id + ']=\"' + (d.dockerBin || 'docker') + '\"');
+    console.log('DEVICE_DOCKER_API[' + d.id + ']=\"' + (d.dockerApi || '') + '\"');
+    console.log('DEVICE_COMPOSE_ROOT[' + d.id + ']=\"' + (dep.composeRoot || '') + '\"');
+    console.log('DEVICE_SMB_ROOT[' + d.id + ']=\"' + (dep.smbRoot || '') + '\"');
+  }
+
+  // Emit tier + service metadata
   const tiers = {};
   for (const svc of s.projects) {
     if (typeof svc.deployTier !== 'number') continue;
     (tiers[svc.deployTier] ??= []).push(svc.id);
+
+    const targetId = svc.deployTarget || defaultTarget;
+    const targetDevice = devices[targetId];
+    const svcHost = targetDevice ? targetDevice.hostname : host;
+
+    console.log('SVC_DEPLOY_TARGET[' + svc.id + ']=\"' + targetId + '\"');
     if (svc.port && svc.healthPath) {
-      console.log('SVC_HEALTH_URL[' + svc.id + ']=\"http://' + host + ':' + svc.port + svc.healthPath + '\"');
+      console.log('SVC_HEALTH_URL[' + svc.id + ']=\"http://' + svcHost + ':' + svc.port + svc.healthPath + '\"');
     }
   }
   const max = Math.max(...Object.keys(tiers).map(Number));
@@ -239,6 +275,17 @@ run_phase() {
   local color="${SVC_COLORS[$svc]:-$DIM}"
   local pad_svc
   pad_svc=$(printf '%-20s' "$svc")
+
+  # ── Export device-specific deploy vars for lib.sh ──────────
+  local target="${SVC_DEPLOY_TARGET[$svc]:-synology}"
+  export DEPLOY_TARGET="$target"
+  export DEPLOY_METHOD="${DEVICE_METHOD[$target]:-ssh}"
+  export DEPLOY_HOSTNAME="${DEVICE_HOSTNAME[$target]:-}"
+  export DEPLOY_SSH_HOST="${DEVICE_SSH_ALIAS[$target]:-nas}"
+  export DEPLOY_DOCKER_BIN="${DEVICE_DOCKER_BIN[$target]:-/usr/local/bin/docker}"
+  export DEPLOY_DOCKER_API="${DEVICE_DOCKER_API[$target]:-}"
+  export DEPLOY_COMPOSE_ROOT="${DEVICE_COMPOSE_ROOT[$target]:-/volume1/docker}"
+  export DEPLOY_SMB_ROOT="${DEVICE_SMB_ROOT[$target]:-/mnt/k}"
 
   if [ "$prefix" = "true" ]; then
     bash "${svc_dir}/deploy.sh" ${phase_flag} $flags 2>&1 \
@@ -622,25 +669,38 @@ if [ ${#MISSING[@]} -gt 0 ]; then
   warn "These services will be skipped"
 fi
 
-# ── Pre-flight: prune orphaned Docker networks on NAS ─────────
+# ── Pre-flight: prune orphaned Docker networks on deploy targets ──
 # Docker has a limited pool of /16 subnets for bridge networks.
 # Old/renamed services leave behind orphaned networks that exhaust
 # the pool, causing "could not find an available IPv4 address pool"
 # errors during deploy. Pruning unused networks prevents this.
 if ! $DRY_RUN; then
-  step "Pruning orphaned Docker networks on NAS"
-  if ssh -o ConnectTimeout=8 -o BatchMode=yes nas "true" 2>/dev/null; then
-    PRUNED=$(ssh nas "sudo /usr/local/bin/docker network prune -f 2>&1" || true)
-    PRUNED_COUNT=$(echo "$PRUNED" | grep -c "Deleted Networks:" || echo "0")
-    PRUNED_NAMES=$(echo "$PRUNED" | grep -v "Deleted Networks:" | grep -v "Total reclaimed" | grep -v "^$" | tr '\n' ' ' || true)
-    if [ -n "$PRUNED_NAMES" ]; then
-      ok "Pruned: ${PRUNED_NAMES}"
-    else
-      ok "No orphaned networks"
+  # Collect unique SSH-based deploy targets
+  declare -A _prune_hosts
+  for svc in "${ALL_SERVICES[@]}"; do
+    local_target="${SVC_DEPLOY_TARGET[$svc]:-synology}"
+    local_method="${DEVICE_METHOD[$local_target]:-ssh}"
+    if [ "$local_method" = "ssh" ]; then
+      _prune_hosts[$local_target]="${DEVICE_SSH_ALIAS[$local_target]:-nas}"
     fi
-  else
-    warn "Cannot reach NAS — skipping network prune (may fail later)"
-  fi
+  done
+
+  for _target_id in "${!_prune_hosts[@]}"; do
+    _ssh_host="${_prune_hosts[$_target_id]}"
+    _docker_bin="${DEVICE_DOCKER_BIN[$_target_id]:-/usr/local/bin/docker}"
+    step "Pruning orphaned Docker networks on ${_target_id} (${_ssh_host})"
+    if ssh -o ConnectTimeout=8 -o BatchMode=yes "$_ssh_host" "true" 2>/dev/null; then
+      PRUNED=$(ssh "$_ssh_host" "sudo ${_docker_bin} network prune -f 2>&1" || true)
+      PRUNED_NAMES=$(echo "$PRUNED" | grep -v "Deleted Networks:" | grep -v "Total reclaimed" | grep -v "^$" | tr '\n' ' ' || true)
+      if [ -n "$PRUNED_NAMES" ]; then
+        ok "Pruned: ${PRUNED_NAMES}"
+      else
+        ok "No orphaned networks"
+      fi
+    else
+      warn "Cannot reach ${_target_id} via SSH — skipping network prune"
+    fi
+  done
 fi
 
 # ── Tier labels (descriptive names for output) ───────────────

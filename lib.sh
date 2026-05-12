@@ -75,10 +75,20 @@ else
   GZIP_CMD="gzip"
 fi
 
-NAS_HOST="nas"                                        # SSH config alias
-NAS_COMPOSE_DIR="/volume1/docker/${IMAGE_NAME}"       # Synology path
-NAS_SMB_DIR="/mnt/k/${IMAGE_NAME}"                    # SMB fallback
-DOCKER_BIN="/usr/local/bin/docker"                    # Synology docker path
+# ── Deploy target (set by deploy-all.sh from projects.json) ───
+# Falls back to legacy defaults (Synology NAS) when run standalone.
+DEPLOY_METHOD="${DEPLOY_METHOD:-ssh}"                 # ssh | docker-api
+DEPLOY_TARGET="${DEPLOY_TARGET:-synology}"            # device ID
+DEPLOY_HOSTNAME="${DEPLOY_HOSTNAME:-}"                # target IP
+DEPLOY_SSH_HOST="${DEPLOY_SSH_HOST:-nas}"             # SSH config alias
+DEPLOY_DOCKER_BIN="${DEPLOY_DOCKER_BIN:-/usr/local/bin/docker}"
+DEPLOY_DOCKER_API="${DEPLOY_DOCKER_API:-}"            # tcp://host:port
+DEPLOY_COMPOSE_ROOT="${DEPLOY_COMPOSE_ROOT:-/volume1/docker}"
+DEPLOY_SMB_ROOT="${DEPLOY_SMB_ROOT:-/mnt/k}"
+
+# Derived paths (SSH method only)
+DEPLOY_COMPOSE_DIR="${DEPLOY_COMPOSE_ROOT}/${IMAGE_NAME}"
+DEPLOY_SMB_DIR="${DEPLOY_SMB_ROOT}/${IMAGE_NAME}"
 
 # ── Flags ─────────────────────────────────────────────────────
 DRY_RUN=false
@@ -113,9 +123,9 @@ printf '%s%s══════════════════════�
 if $BUILD_ONLY; then
   printf '%s%s  %s — Build%s\n' "$CYAN" "$BOLD" "$DISPLAY_NAME" "$RESET"
 elif $DEPLOY_ONLY; then
-  printf '%s%s  %s — Deploy to Synology%s\n' "$CYAN" "$BOLD" "$DISPLAY_NAME" "$RESET"
+  printf '%s%s  %s — Deploy to %s%s\n' "$CYAN" "$BOLD" "$DISPLAY_NAME" "$DEPLOY_TARGET" "$RESET"
 else
-  printf '%s%s  %s — Build & Deploy to Synology%s\n' "$CYAN" "$BOLD" "$DISPLAY_NAME" "$RESET"
+  printf '%s%s  %s — Build & Deploy to %s%s\n' "$CYAN" "$BOLD" "$DISPLAY_NAME" "$DEPLOY_TARGET" "$RESET"
 fi
 if $DRY_RUN; then
   printf '%s%s  ⚠  DRY RUN — no changes will be made%s\n' "$YELLOW" "$BOLD" "$RESET"
@@ -282,7 +292,7 @@ if ! $DEPLOY_ONLY; then
 fi
 
 # ══════════════════════════════════════════════════════════════
-# DEPLOY PHASE (SSH/SMB transfer + restart)
+# DEPLOY PHASE (multi-device: SSH or Docker API)
 # Runs for: default mode and --deploy-only
 # ══════════════════════════════════════════════════════════════
 
@@ -296,159 +306,239 @@ if $DEPLOY_ONLY; then
   DEPLOY_ENV="${DEPLOY_KIT_DIR}/.env.deploy"
 fi
 
-# ── Detect SSH access (retry with jittered backoff for parallel tiers) ──
-HAS_SSH=false
-for _ssh_attempt in 1 2; do
-  if ssh -o ConnectTimeout=8 -o BatchMode=yes "$NAS_HOST" "true" 2>/dev/null; then
-    HAS_SSH=true
-    ok "SSH access to ${NAS_HOST} confirmed"
-    break
+# ── Shared: verify container is running after restart ─────────
+verify_container() {
+  local check_cmd="$1"  # command prefix to run docker ps
+  HEALTH_MAX=10
+  HEALTH_INTERVAL=2
+  HEALTH_OK=false
+  for _h in $(seq 1 $HEALTH_MAX); do
+    sleep $HEALTH_INTERVAL
+    CONTAINER_STATUS=$($check_cmd ps --filter "name=^${IMAGE_NAME}$" --format '{{.Status}}' 2>/dev/null || echo "")
+    if [ -z "$CONTAINER_STATUS" ]; then
+      fail "Container '${IMAGE_NAME}' not found after restart — deploy failed"
+    fi
+    if echo "$CONTAINER_STATUS" | grep -qiE '^Up'; then
+      HEALTH_OK=true
+      break
+    fi
+    if [ "$_h" -lt "$HEALTH_MAX" ]; then
+      info "Container not ready yet (${CONTAINER_STATUS}) — retrying in ${HEALTH_INTERVAL}s... (${_h}/${HEALTH_MAX})"
+    fi
+  done
+  if ! $HEALTH_OK; then
+    fail "Container '${IMAGE_NAME}' is not running after ${HEALTH_MAX} checks (status: ${CONTAINER_STATUS})"
   fi
-  if [ "$_ssh_attempt" -eq 1 ]; then
-    # Jittered backoff: 2-5s random delay before retry (avoids thundering herd)
-    _jitter=$(( (RANDOM % 4) + 2 ))
-    info "SSH probe failed — retrying in ${_jitter}s..."
-    sleep "$_jitter"
-  fi
-done
-if ! $HAS_SSH; then
-  warn "SSH to '${NAS_HOST}' unavailable after 2 attempts — will fall back to SMB export"
-fi
+  ok "Container running (${CONTAINER_STATUS})"
+}
 
-# ── 3. Deploy ─────────────────────────────────────────────────
-if $HAS_SSH; then
-  # ── SSH path: pipe image + copy env + restart ──────────────
-  step "Deploying via SSH → ${NAS_HOST}"
+# ══════════════════════════════════════════════════════════════
+# METHOD: docker-api  — pipe image + compose via DOCKER_HOST
+# ══════════════════════════════════════════════════════════════
+deploy_docker_api() {
+  local remote_host="$DEPLOY_DOCKER_API"
+  step "Deploying via Docker API → ${remote_host} (${DEPLOY_TARGET})"
 
   if $DRY_RUN; then
     info "(skipped — dry run)"
-  else
-    # Ensure compose directory exists on NAS
-    ssh "$NAS_HOST" "mkdir -p '${NAS_COMPOSE_DIR}' 2>/dev/null || sudo mkdir -p '${NAS_COMPOSE_DIR}'"
+    return 0
+  fi
 
-    # Copy docker-compose.yml
+  # Verify connectivity
+  if ! docker -H "$remote_host" info > /dev/null 2>&1; then
+    fail "Cannot connect to Docker API at ${remote_host}"
+  fi
+  ok "Docker API at ${remote_host} reachable"
+
+  # Transfer image
+  TRANSFER_START=$SECONDS
+  info "Piping image to remote Docker daemon..."
+  docker save "$TAG_LATEST" | $GZIP_CMD | docker -H "$remote_host" load
+  ok "Image transferred in $((SECONDS - TRANSFER_START))s"
+
+  # Stage .env next to docker-compose.yml so env_file: .env resolves
+  local staged_env=false
+  if [ "$SKIP_ENV_DEPLOY" != "true" ] && [ -f "$DEPLOY_ENV" ]; then
+    # Back up existing .env if present (don't clobber local dev config)
+    [ -f "${SCRIPT_DIR}/.env" ] && cp "${SCRIPT_DIR}/.env" "${SCRIPT_DIR}/.env.pre-deploy"
+    cp "$DEPLOY_ENV" "${SCRIPT_DIR}/.env"
+    staged_env=true
+    ok ".env staged for compose"
+  fi
+
+  # Build compose file flags — stack device-specific override if present
+  local compose_files="-f ${SCRIPT_DIR}/docker-compose.yml"
+  local override_file="${SCRIPT_DIR}/docker-compose.${DEPLOY_TARGET}.yml"
+  if [ -f "$override_file" ]; then
+    compose_files="$compose_files -f $override_file"
+    info "Using device override: docker-compose.${DEPLOY_TARGET}.yml"
+  fi
+
+  # Restart container via local compose targeting remote daemon
+  info "Restarting container..."
+  set +e
+  COMPOSE_OUTPUT=$(DOCKER_HOST="$remote_host" docker compose \
+    $compose_files \
+    down --remove-orphans 2>&1)
+  COMPOSE_OUTPUT+=$'\n'
+  COMPOSE_OUTPUT+=$(DOCKER_HOST="$remote_host" docker compose \
+    $compose_files \
+    up -d 2>&1)
+  COMPOSE_EXIT=$?
+  set -e
+
+  echo "$COMPOSE_OUTPUT" | sed 's/^/ /'
+
+  # Restore original .env
+  if $staged_env; then
+    if [ -f "${SCRIPT_DIR}/.env.pre-deploy" ]; then
+      mv "${SCRIPT_DIR}/.env.pre-deploy" "${SCRIPT_DIR}/.env"
+    else
+      rm -f "${SCRIPT_DIR}/.env"
+    fi
+  fi
+
+  if echo "$COMPOSE_OUTPUT" | grep -qiE 'could not find an available.*address pool|port is already allocated|driver failed programming'; then
+    fail "Container failed to start — Docker infrastructure error detected"
+  fi
+  if [ "$COMPOSE_EXIT" -ne 0 ]; then
+    fail "Container restart failed (exit ${COMPOSE_EXIT})"
+  fi
+
+  # Verify container running
+  verify_container "docker -H $remote_host"
+
+  # Prune old images
+  info "Pruning old images..."
+  docker -H "$remote_host" images "${IMAGE_NAME}" --format '{{.Tag}} {{.ID}}' \
+    | grep -v 'latest' \
+    | awk '{print $2}' \
+    | xargs -r docker -H "$remote_host" rmi 2>/dev/null || true
+  docker -H "$remote_host" image prune -f 2>/dev/null | sed 's/^/  /' || true
+}
+
+# ══════════════════════════════════════════════════════════════
+# METHOD: ssh  — pipe image + copy files + restart over SSH
+# ══════════════════════════════════════════════════════════════
+deploy_ssh() {
+  # Detect SSH access (retry with jittered backoff for parallel tiers)
+  HAS_SSH=false
+  for _ssh_attempt in 1 2; do
+    if ssh -o ConnectTimeout=8 -o BatchMode=yes "$DEPLOY_SSH_HOST" "true" 2>/dev/null; then
+      HAS_SSH=true
+      ok "SSH access to ${DEPLOY_SSH_HOST} confirmed"
+      break
+    fi
+    if [ "$_ssh_attempt" -eq 1 ]; then
+      _jitter=$(( (RANDOM % 4) + 2 ))
+      info "SSH probe failed — retrying in ${_jitter}s..."
+      sleep "$_jitter"
+    fi
+  done
+
+  if $HAS_SSH; then
+    step "Deploying via SSH → ${DEPLOY_SSH_HOST} (${DEPLOY_TARGET})"
+
+    if $DRY_RUN; then
+      info "(skipped — dry run)"
+      return 0
+    fi
+
+    ssh "$DEPLOY_SSH_HOST" "mkdir -p '${DEPLOY_COMPOSE_DIR}' 2>/dev/null || sudo mkdir -p '${DEPLOY_COMPOSE_DIR}'"
+
     info "Syncing docker-compose.yml..."
-    cat "${SCRIPT_DIR}/docker-compose.yml" | ssh "$NAS_HOST" "cat > '${NAS_COMPOSE_DIR}/docker-compose.yml'"
+    cat "${SCRIPT_DIR}/docker-compose.yml" | ssh "$DEPLOY_SSH_HOST" "cat > '${DEPLOY_COMPOSE_DIR}/docker-compose.yml'"
 
-    # Copy .env.deploy → .env on NAS (unless skipped)
+    # Sync device-specific compose override if present
+    local remote_compose_cmd="compose -f docker-compose.yml"
+    local override_file="${SCRIPT_DIR}/docker-compose.${DEPLOY_TARGET}.yml"
+    if [ -f "$override_file" ]; then
+      info "Syncing device override: docker-compose.${DEPLOY_TARGET}.yml..."
+      cat "$override_file" | ssh "$DEPLOY_SSH_HOST" "cat > '${DEPLOY_COMPOSE_DIR}/docker-compose.${DEPLOY_TARGET}.yml'"
+      remote_compose_cmd="compose -f docker-compose.yml -f docker-compose.${DEPLOY_TARGET}.yml"
+    fi
+
     if [ "$SKIP_ENV_DEPLOY" != "true" ] && [ -f "$DEPLOY_ENV" ]; then
       info "Syncing .env.deploy → .env..."
-      cat "$DEPLOY_ENV" | ssh "$NAS_HOST" "cat > '${NAS_COMPOSE_DIR}/.env'"
+      cat "$DEPLOY_ENV" | ssh "$DEPLOY_SSH_HOST" "cat > '${DEPLOY_COMPOSE_DIR}/.env'"
       ok ".env synced"
     fi
 
-    # Call optional extra SSH sync hook
     if type EXTRA_SSH_SYNC &>/dev/null; then
       EXTRA_SSH_SYNC
     fi
 
-    # Pipe image directly — no temp file, no SMB
     TRANSFER_START=$SECONDS
     info "Piping image over SSH (this may take a moment)..."
-    docker save "$TAG_LATEST" | $GZIP_CMD | ssh "$NAS_HOST" "gunzip | sudo ${DOCKER_BIN} load"
+    docker save "$TAG_LATEST" | $GZIP_CMD | ssh "$DEPLOY_SSH_HOST" "gunzip | sudo ${DEPLOY_DOCKER_BIN} load"
     ok "Image transferred in $((SECONDS - TRANSFER_START))s"
 
-    # Restart container
     info "Restarting container..."
-    COMPOSE_OUTPUT=$(ssh "$NAS_HOST" "cd '${NAS_COMPOSE_DIR}' && sudo ${DOCKER_BIN} compose down --remove-orphans 2>&1 && sudo ${DOCKER_BIN} compose up -d 2>&1" 2>&1)
+    COMPOSE_OUTPUT=$(ssh "$DEPLOY_SSH_HOST" "cd '${DEPLOY_COMPOSE_DIR}' && sudo ${DEPLOY_DOCKER_BIN} ${remote_compose_cmd} down --remove-orphans 2>&1 && sudo ${DEPLOY_DOCKER_BIN} ${remote_compose_cmd} up -d 2>&1" 2>&1)
     COMPOSE_EXIT=$?
     echo "$COMPOSE_OUTPUT" | sed 's/^/ /'
 
-    # Check for known Docker infrastructure failures even if exit code is 0
     if echo "$COMPOSE_OUTPUT" | grep -qiE 'could not find an available.*address pool|port is already allocated|driver failed programming'; then
-      fail "Container failed to start — Docker infrastructure error detected (network pool exhaustion or port conflict)"
+      fail "Container failed to start — Docker infrastructure error detected"
     fi
-
     if [ "$COMPOSE_EXIT" -ne 0 ]; then
       fail "Container restart failed (exit ${COMPOSE_EXIT})"
     fi
 
-    # Verify container is actually running (not just "Created" or crash-looping)
-    # Retry loop: services may briefly crash-restart while waiting for dependencies
-    # (e.g., Vault not yet reachable on first boot). Give up to 20s to stabilize.
-    HEALTH_MAX=10        # max attempts
-    HEALTH_INTERVAL=2    # seconds between checks
-    HEALTH_OK=false
-    for _h in $(seq 1 $HEALTH_MAX); do
-      sleep $HEALTH_INTERVAL
-      CONTAINER_STATUS=$(ssh "$NAS_HOST" "sudo ${DOCKER_BIN} ps --filter 'name=^${IMAGE_NAME}$' --format '{{.Status}}'" 2>/dev/null || echo "")
-      if [ -z "$CONTAINER_STATUS" ]; then
-        fail "Container '${IMAGE_NAME}' not found after restart — deploy failed"
-      fi
-      if echo "$CONTAINER_STATUS" | grep -qiE '^Up'; then
-        HEALTH_OK=true
-        break
-      fi
-      if [ "$_h" -lt "$HEALTH_MAX" ]; then
-        info "Container not ready yet (${CONTAINER_STATUS}) — retrying in ${HEALTH_INTERVAL}s... (${_h}/${HEALTH_MAX})"
-      fi
-    done
-    if ! $HEALTH_OK; then
-      fail "Container '${IMAGE_NAME}' is not running after ${HEALTH_MAX} checks (status: ${CONTAINER_STATUS})"
-    fi
-    ok "Container running (${CONTAINER_STATUS})"
+    verify_container "ssh $DEPLOY_SSH_HOST sudo ${DEPLOY_DOCKER_BIN}"
 
-    # Clean up old SHA-tagged images (keeps only :latest)
     info "Pruning old images..."
-    ssh "$NAS_HOST" "sudo ${DOCKER_BIN} images '${IMAGE_NAME}' --format '{{.Tag}} {{.ID}}' \
+    ssh "$DEPLOY_SSH_HOST" "sudo ${DEPLOY_DOCKER_BIN} images '${IMAGE_NAME}' --format '{{.Tag}} {{.ID}}' \
       | grep -v 'latest' \
       | awk '{print \$2}' \
-      | xargs -r sudo ${DOCKER_BIN} rmi 2>/dev/null || true"
-    ssh "$NAS_HOST" "sudo ${DOCKER_BIN} image prune -f" 2>/dev/null | sed 's/^/  /' || true
-  fi
+      | xargs -r sudo ${DEPLOY_DOCKER_BIN} rmi 2>/dev/null || true"
+    ssh "$DEPLOY_SSH_HOST" "sudo ${DEPLOY_DOCKER_BIN} image prune -f" 2>/dev/null | sed 's/^/  /' || true
 
-else
-  # ── SMB fallback: export tarball to K: ─────────────────────
-  step "Exporting via SMB → ${NAS_SMB_DIR}"
-
-  if $DRY_RUN; then
-    info "(skipped — dry run)"
   else
-    TARBALL="${IMAGE_NAME}.tar.gz"
+    # ── SMB fallback ──────────────────────────────────────────
+    warn "SSH to '${DEPLOY_SSH_HOST}' unavailable — falling back to SMB export"
+    step "Exporting via SMB → ${DEPLOY_SMB_DIR}"
 
+    if $DRY_RUN; then
+      info "(skipped — dry run)"
+      return 0
+    fi
+
+    TARBALL="${IMAGE_NAME}.tar.gz"
     info "Saving image..."
     docker save "$TAG_LATEST" | $GZIP_CMD > "/tmp/${TARBALL}"
 
-    info "Copying to NAS..."
-    if ! mkdir -p "${NAS_SMB_DIR}" 2>/dev/null; then
+    if ! mkdir -p "${DEPLOY_SMB_DIR}" 2>/dev/null; then
       rm -f "/tmp/${TARBALL}"
-      printf '  %s✖ Cannot create %s — is /mnt/k mounted? Check permissions.%s\n' "$RED" "$NAS_SMB_DIR" "$RESET" >&2
+      printf '  %s✖ Cannot create %s — is SMB mounted? Check permissions.%s\n' "$RED" "$DEPLOY_SMB_DIR" "$RESET" >&2
       exit 1
     fi
 
-    if ! cp "/tmp/${TARBALL}" "${NAS_SMB_DIR}/${TARBALL}"; then
-      rm -f "/tmp/${TARBALL}"
-      printf '  %s✖ Failed to copy image tarball to %s%s\n' "$RED" "$NAS_SMB_DIR" "$RESET" >&2
-      exit 1
-    fi
-
-    if ! cp "${SCRIPT_DIR}/docker-compose.yml" "${NAS_SMB_DIR}/docker-compose.yml"; then
-      rm -f "/tmp/${TARBALL}"
-      printf '  %s✖ Failed to copy docker-compose.yml to %s%s\n' "$RED" "$NAS_SMB_DIR" "$RESET" >&2
-      exit 1
-    fi
+    cp "/tmp/${TARBALL}" "${DEPLOY_SMB_DIR}/${TARBALL}" || { rm -f "/tmp/${TARBALL}"; fail "Failed to copy image tarball"; }
+    cp "${SCRIPT_DIR}/docker-compose.yml" "${DEPLOY_SMB_DIR}/docker-compose.yml" || { rm -f "/tmp/${TARBALL}"; fail "Failed to copy docker-compose.yml"; }
 
     if [ "$SKIP_ENV_DEPLOY" != "true" ] && [ -f "$DEPLOY_ENV" ]; then
-      if ! cp "$DEPLOY_ENV" "${NAS_SMB_DIR}/.env"; then
-        rm -f "/tmp/${TARBALL}"
-        printf '  %s✖ Failed to copy .env to %s%s\n' "$RED" "$NAS_SMB_DIR" "$RESET" >&2
-        exit 1
-      fi
+      cp "$DEPLOY_ENV" "${DEPLOY_SMB_DIR}/.env" || { rm -f "/tmp/${TARBALL}"; fail "Failed to copy .env"; }
     fi
 
-    # Call optional extra SMB sync hook
     if type EXTRA_SMB_SYNC &>/dev/null; then
       EXTRA_SMB_SYNC
     fi
 
     rm -f "/tmp/${TARBALL}"
-
-    ok "Image exported to ${NAS_SMB_DIR}/${TARBALL}"
+    ok "Image exported to ${DEPLOY_SMB_DIR}/${TARBALL}"
     echo ""
-    warn "Manual steps required in Synology Container Manager:"
-    info "  1. Image → Add → From File → select ${TARBALL}"
-    info "  2. Project → ${IMAGE_NAME} → Stop → Start"
+    warn "Manual steps required on ${DEPLOY_TARGET}:"
+    info "  1. Load image: docker load < ${TARBALL}"
+    info "  2. Restart:    docker compose up -d"
   fi
+}
+
+# ── 3. Dispatch to deploy method ──────────────────────────────
+if [ "$DEPLOY_METHOD" = "docker-api" ]; then
+  deploy_docker_api
+else
+  deploy_ssh
 fi
 
 # ── Summary ───────────────────────────────────────────────────
@@ -460,6 +550,6 @@ if $DEPLOY_ONLY; then
 else
   printf '%s%s  ✅ Build & deploy complete in %ss%s\n' "$GREEN" "$BOLD" "$TOTAL" "$RESET"
 fi
-printf '  %s%s@%s → %s (%s)%s\n' "$DIM" "$GIT_BRANCH" "$GIT_SHA" "$NAS_HOST" "$BUILD_TIME" "$RESET"
+printf '  %s%s@%s → %s (%s)%s\n' "$DIM" "$GIT_BRANCH" "$GIT_SHA" "$DEPLOY_TARGET" "$BUILD_TIME" "$RESET"
 printf '%s%s══════════════════════════════════════════════════════%s\n' "$GREEN" "$BOLD" "$RESET"
 echo ""
