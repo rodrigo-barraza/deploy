@@ -204,9 +204,10 @@ if ! $DEPLOY_ONLY; then
     # to forward the host SSH agent for private git deps.
 
     if ! git diff --quiet package-lock.json 2>/dev/null; then
-      step "Lockfile was out of sync — committing fix"
+      step "Lockfile was out of sync — committing and pushing fix"
       git add package-lock.json
       git commit -m "chore: regenerate package-lock.json" --no-verify 2>&1 | sed 's/^/  /'
+      git push origin HEAD 2>&1 | sed 's/^/  /'
       GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
       ok "Lockfile synced (now at ${GIT_SHA})"
     else
