@@ -112,8 +112,13 @@ eval "$(node -e "
   // Emit tier + service metadata
   const tiers = {};
   for (const svc of s.projects) {
-    if (typeof svc.deployTier !== 'number') continue;
-    (tiers[svc.deployTier] ??= []).push(svc.id);
+    let tier = svc.deployTier;
+    if (typeof tier !== 'number') {
+      if (svc.id.endsWith('-service')) tier = 1;
+      else if (svc.id.endsWith('-client') || svc.id.endsWith('-bot')) tier = 2;
+      else continue;
+    }
+    (tiers[tier] ??= []).push(svc.id);
 
     const targetId = svc.deployTarget || defaultTarget;
     const targetDevice = devices[targetId];
