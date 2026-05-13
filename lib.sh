@@ -351,6 +351,15 @@ deploy_docker_api() {
   fi
   ok "Docker API at ${remote_host} reachable"
 
+  # Preserve previous image for rollback
+  PREV_TAG="${IMAGE_NAME}:previous"
+  HAS_CURRENT=$(docker -H "$remote_host" images "$TAG_LATEST" --format '{{.ID}}' 2>/dev/null || true)
+  if [ -n "$HAS_CURRENT" ]; then
+    info "Tagging current :latest as :previous for rollback..."
+    docker -H "$remote_host" tag "$TAG_LATEST" "$PREV_TAG" 2>/dev/null || true
+    ok "Rollback image saved as ${PREV_TAG}"
+  fi
+
   # Transfer image
   TRANSFER_START=$SECONDS
   info "Piping image to remote Docker daemon..."
@@ -409,10 +418,10 @@ deploy_docker_api() {
   # Verify container running
   verify_container "docker -H $remote_host"
 
-  # Prune old images
+  # Prune old images (keep :latest and :previous for rollback)
   info "Pruning old images..."
   docker -H "$remote_host" images "${IMAGE_NAME}" --format '{{.Tag}} {{.ID}}' \
-    | grep -v 'latest' \
+    | grep -vE '^(latest|previous) ' \
     | awk '{print $2}' \
     | xargs -r docker -H "$remote_host" rmi 2>/dev/null || true
   docker -H "$remote_host" image prune -f 2>/dev/null | sed 's/^/  /' || true
@@ -469,6 +478,15 @@ deploy_ssh() {
       EXTRA_SSH_SYNC
     fi
 
+    # Preserve previous image for rollback
+    PREV_TAG="${IMAGE_NAME}:previous"
+    HAS_CURRENT=$(ssh "$DEPLOY_SSH_HOST" "sudo ${DEPLOY_DOCKER_BIN} images '${TAG_LATEST}' --format '{{.ID}}'" 2>/dev/null || true)
+    if [ -n "$HAS_CURRENT" ]; then
+      info "Tagging current :latest as :previous for rollback..."
+      ssh "$DEPLOY_SSH_HOST" "sudo ${DEPLOY_DOCKER_BIN} tag '${TAG_LATEST}' '${PREV_TAG}'" 2>/dev/null || true
+      ok "Rollback image saved as ${PREV_TAG}"
+    fi
+
     TRANSFER_START=$SECONDS
     info "Piping image over SSH (this may take a moment)..."
     docker save "$TAG_LATEST" | $GZIP_CMD | ssh "$DEPLOY_SSH_HOST" "gunzip | sudo ${DEPLOY_DOCKER_BIN} load"
@@ -488,9 +506,9 @@ deploy_ssh() {
 
     verify_container "ssh $DEPLOY_SSH_HOST sudo ${DEPLOY_DOCKER_BIN}"
 
-    info "Pruning old images..."
+    info "Pruning old images (keeping :previous for rollback)..."
     ssh "$DEPLOY_SSH_HOST" "sudo ${DEPLOY_DOCKER_BIN} images '${IMAGE_NAME}' --format '{{.Tag}} {{.ID}}' \
-      | grep -v 'latest' \
+      | grep -vE '^(latest|previous) ' \
       | awk '{print \$2}' \
       | xargs -r sudo ${DEPLOY_DOCKER_BIN} rmi 2>/dev/null || true"
     ssh "$DEPLOY_SSH_HOST" "sudo ${DEPLOY_DOCKER_BIN} image prune -f" 2>/dev/null | sed 's/^/  /' || true
