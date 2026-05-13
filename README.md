@@ -233,3 +233,31 @@ Both Client and Server sections should appear. API version auto-negotiation (`do
 | `EOF` on connect | Port proxy on `0.0.0.0` stealing the port | Rebind to specific LAN IP |
 | `Cannot connect` after adding proxy | IP Helper not restarted | `Restart-Service iphlpsvc` |
 | API version mismatch warning | Different Docker versions | Normal — auto-negotiated, no action needed |
+
+## Scripts
+
+```bash
+npm run deploy           # Deploy all services in dependency order
+npm run deploy:dry       # Validate all deployments without deploying
+npm run cleanup          # Clean up local Docker images
+npm run cleanup:force    # Force clean up local Docker images
+npm run deploy:bots      # Deploy all bot services
+npm run deploy:changed   # Deploy only services with git changes
+npm run deploy:clients   # Deploy all client applications
+npm run deploy:services  # Deploy all backend services (excl. vault)
+npm run deploy:sync      # Sync deploy.sh scripts across projects
+npm run deploy:vault     # Deploy vault-service only
+```
+
+### Per-Service Deploy
+
+```bash
+# Individual services (see package.json for full list)
+npm run deploy:clankerbox-client
+npm run deploy:clankerbox-service
+npm run deploy:classic-whitemane-client
+npm run deploy:clock-crew-client
+npm run deploy:clock-crew-service
+# ... and 25 more
+```
+

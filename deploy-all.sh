@@ -93,6 +93,7 @@ eval "$(node -e "
   const defaultTarget = 'synology';
 
   // Emit device deploy metadata
+  const dockerDeviceIds = [];
   for (const d of (s.devices || [])) {
     const dep = d.deploy || {};
     const method = dep.method || 'ssh';
@@ -103,7 +104,10 @@ eval "$(node -e "
     console.log('DEVICE_DOCKER_API[' + d.id + ']=\"' + (d.dockerApi || '') + '\"');
     console.log('DEVICE_COMPOSE_ROOT[' + d.id + ']=\"' + (dep.composeRoot || '') + '\"');
     console.log('DEVICE_SMB_ROOT[' + d.id + ']=\"' + (dep.smbRoot || '') + '\"');
+    // Track devices that support Docker containers (have a deploy config)
+    if (dep.method) dockerDeviceIds.push(d.id);
   }
+  console.log('DOCKER_DEVICES=(' + dockerDeviceIds.join(' ') + ')');
 
   // Emit tier + service metadata
   const tiers = {};
@@ -733,6 +737,90 @@ done
 if ! $NO_PARALLEL; then
   echo ""
   info "All builds launched — waiting will happen per-tier before deploy"
+fi
+
+# ══════════════════════════════════════════════════════════════
+# PRE-DEPLOY — Cross-device orphan container teardown
+# When a project moves between devices (e.g. synology → workstation2),
+# the old container would keep running. Before deploying, check ALL
+# Docker-capable devices (except the target) for a container with
+# the same name and tear it down.
+# ══════════════════════════════════════════════════════════════
+if ! $DRY_RUN && [ ${#DOCKER_DEVICES[@]} -gt 1 ]; then
+  echo ""
+  printf '%s%s┌──────────────────────────────────────────────────────────┐%s\n' "$YELLOW" "$BOLD" "$RESET"
+  printf '%s%s│  PRE-DEPLOY — Cross-device orphan teardown               │%s\n' "$YELLOW" "$BOLD" "$RESET"
+  printf '%s%s│  Checking other devices for stale containers             │%s\n' "$YELLOW" "$BOLD" "$RESET"
+  printf '%s%s└──────────────────────────────────────────────────────────┘%s\n' "$YELLOW" "$BOLD" "$RESET"
+
+  # Build a reachability cache so we only probe each device once
+  declare -A _device_reachable
+  for _dev in "${DOCKER_DEVICES[@]}"; do
+    _dev_method="${DEVICE_METHOD[$_dev]:-ssh}"
+    if [ "$_dev_method" = "docker-api" ]; then
+      _dev_api="${DEVICE_DOCKER_API[$_dev]:-}"
+      if [ -n "$_dev_api" ] && docker -H "$_dev_api" info > /dev/null 2>&1; then
+        _device_reachable[$_dev]="true"
+      else
+        _device_reachable[$_dev]="false"
+        warn "Cannot reach ${_dev} via Docker API — skipping orphan check"
+      fi
+    else
+      _dev_ssh="${DEVICE_SSH_ALIAS[$_dev]:-}"
+      if [ -n "$_dev_ssh" ] && ssh -o ConnectTimeout=8 -o BatchMode=yes "$_dev_ssh" "true" 2>/dev/null; then
+        _device_reachable[$_dev]="true"
+      else
+        _device_reachable[$_dev]="false"
+        warn "Cannot reach ${_dev} via SSH — skipping orphan check"
+      fi
+    fi
+  done
+
+  for svc in "${ALL_SERVICES[@]}"; do
+    should_deploy "$svc" || continue
+
+    local_target="${SVC_DEPLOY_TARGET[$svc]:-synology}"
+
+    for _dev in "${DOCKER_DEVICES[@]}"; do
+      # Skip the device this service is deploying TO
+      [ "$_dev" = "$local_target" ] && continue
+      # Skip unreachable devices
+      [ "${_device_reachable[$_dev]:-false}" = "true" ] || continue
+
+      _dev_method="${DEVICE_METHOD[$_dev]:-ssh}"
+
+      if [ "$_dev_method" = "docker-api" ]; then
+        _dev_api="${DEVICE_DOCKER_API[$_dev]:-}"
+        _container=$(docker -H "$_dev_api" ps -a --filter "name=^${svc}$" --format '{{.Names}}' 2>/dev/null || true)
+        if [ -n "$_container" ]; then
+          warn "Found orphan container '${svc}' on ${_dev} — tearing down"
+          docker -H "$_dev_api" rm -f "$svc" 2>/dev/null || true
+          # Also try compose down if a compose dir exists
+          _dev_compose_root="${DEVICE_COMPOSE_ROOT[$_dev]:-}"
+          if [ -n "$_dev_compose_root" ]; then
+            DOCKER_HOST="$_dev_api" docker compose -f "${_dev_compose_root}/${svc}/docker-compose.yml" down --remove-orphans 2>/dev/null || true
+          fi
+          ok "Orphan '${svc}' removed from ${_dev}"
+        fi
+      else
+        _dev_ssh="${DEVICE_SSH_ALIAS[$_dev]:-}"
+        _dev_docker_bin="${DEVICE_DOCKER_BIN[$_dev]:-/usr/local/bin/docker}"
+        _container=$(ssh "$_dev_ssh" "sudo ${_dev_docker_bin} ps -a --filter 'name=^${svc}\$' --format '{{.Names}}'" 2>/dev/null || true)
+        if [ -n "$_container" ]; then
+          warn "Found orphan container '${svc}' on ${_dev} — tearing down"
+          _dev_compose_root="${DEVICE_COMPOSE_ROOT[$_dev]:-}"
+          if [ -n "$_dev_compose_root" ]; then
+            ssh "$_dev_ssh" "cd '${_dev_compose_root}/${svc}' 2>/dev/null && sudo ${_dev_docker_bin} compose down --remove-orphans 2>&1 || sudo ${_dev_docker_bin} rm -f '${svc}' 2>&1" 2>/dev/null || true
+          else
+            ssh "$_dev_ssh" "sudo ${_dev_docker_bin} rm -f '${svc}'" 2>/dev/null || true
+          fi
+          ok "Orphan '${svc}' removed from ${_dev}"
+        fi
+      fi
+    done
+  done
+
+  ok "Cross-device orphan check complete"
 fi
 
 # ══════════════════════════════════════════════════════════════
