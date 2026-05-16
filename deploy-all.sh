@@ -236,8 +236,16 @@ should_deploy() {
   return 0
 }
 
+# ── Persistent deploy-state directory (survives across runs) ──
+DEPLOY_STATE_DIR="${SCRIPT_DIR}/.deploy-state"
+mkdir -p "$DEPLOY_STATE_DIR"
+
 # ── Change detection ──────────────────────────────────────────
-# Returns 0 (true) if service has changes since last built image
+# Returns 0 (true) if service has changes since last built image.
+# Two-tier SHA lookup:
+#   1. Docker image label "git.sha" (services that build locally)
+#   2. Persistent marker file .deploy-state/<svc>.sha (services
+#      using pre-built images, e.g. qbittorrent-service)
 has_changes() {
   local svc="$1"
   local svc_dir="${ROOT_DIR}/${svc}"
@@ -253,12 +261,20 @@ has_changes() {
     return 0
   fi
 
-  # Get the git SHA baked into the current :latest image label
+  # Tier 1: Docker image label (locally-built services)
   local last_sha
   last_sha=$(docker inspect --format '{{index .Config.Labels "git.sha"}}' "${svc}:latest" 2>/dev/null || echo "")
 
+  # Tier 2: Persistent marker file (pre-built / non-docker-build services)
   if [ -z "$last_sha" ]; then
-    # No previous image or no label — must build
+    local marker_file="${DEPLOY_STATE_DIR}/${svc}.sha"
+    if [ -f "$marker_file" ]; then
+      last_sha=$(cat "$marker_file" 2>/dev/null || echo "")
+    fi
+  fi
+
+  if [ -z "$last_sha" ]; then
+    # No previous image or marker — must build
     return 0
   fi
 
@@ -329,6 +345,19 @@ run_phase() {
       | tee "$log_file" \
       && echo "OK" > "$status_file" \
       || echo "FAIL" > "$status_file"
+  fi
+
+  # ── Persist deploy SHA marker for non-docker-build services ──
+  # Services that build local Docker images get a git.sha label
+  # automatically (via lib.sh). Services using pre-built images
+  # (e.g. qbittorrent-service) don't — so we persist the SHA to
+  # a marker file for has_changes() to use on subsequent runs.
+  if [ "$phase" = "deploy" ] && [ "$(cat "$status_file" 2>/dev/null)" = "OK" ]; then
+    local current_sha
+    current_sha=$(cd "$svc_dir" && git rev-parse HEAD 2>/dev/null || echo "")
+    if [ -n "$current_sha" ]; then
+      echo "$current_sha" > "${DEPLOY_STATE_DIR}/${svc}.sha"
+    fi
   fi
 }
 

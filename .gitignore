@@ -1,5 +1,8 @@
 # Deploy logs
 .deploy-logs/
 
+# Persistent deploy state (SHA markers for change detection)
+.deploy-state/
+
 # Deploy secrets (real values — use .env.deploy.example as template)
 .env.deploy
