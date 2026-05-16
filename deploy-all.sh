@@ -888,6 +888,44 @@ for tier in $(seq 0 "$MAX_TIER"); do
 done
 
 
+# ══════════════════════════════════════════════════════════════
+# PHASE 3 — LOCAL IMAGE CLEANUP
+# Remove SHA-tagged images (keep only :latest per service for
+# --changed-only SHA label detection) and prune dangling layers.
+# ══════════════════════════════════════════════════════════════
+if ! $DRY_RUN; then
+  echo ""
+  printf '%s%s┌──────────────────────────────────────────────────────────┐%s\n' "$YELLOW" "$BOLD" "$RESET"
+  printf '%s%s│  PHASE 3 — LOCAL IMAGE CLEANUP                          │%s\n' "$YELLOW" "$BOLD" "$RESET"
+  printf '%s%s│  Remove stale SHA tags and prune dangling layers         │%s\n' "$YELLOW" "$BOLD" "$RESET"
+  printf '%s%s└──────────────────────────────────────────────────────────┘%s\n' "$YELLOW" "$BOLD" "$RESET"
+
+  CLEANED=0
+  for svc in "${ALL_SERVICES[@]}"; do
+    # Remove all tags except :latest (needed for --changed-only)
+    stale_tags=$(docker images "$svc" --format '{{.Tag}} {{.ID}}' 2>/dev/null | grep -v 'latest' || true)
+    if [ -n "$stale_tags" ]; then
+      count=$(echo "$stale_tags" | wc -l)
+      while IFS= read -r line; do
+        tag=$(echo "$line" | awk '{print $1}')
+        docker rmi "${svc}:${tag}" 2>/dev/null || true
+      done <<< "$stale_tags"
+      CLEANED=$((CLEANED + count))
+    fi
+  done
+
+  # Prune dangling images and build cache
+  PRUNE_OUTPUT=$(docker image prune -f 2>/dev/null || true)
+  RECLAIMED=$(echo "$PRUNE_OUTPUT" | grep 'Total reclaimed space' || echo "0B reclaimed")
+
+  if [ "$CLEANED" -gt 0 ]; then
+    ok "Removed ${CLEANED} stale local image tags — ${RECLAIMED}"
+  else
+    ok "No stale local images to clean"
+  fi
+fi
+
+
 # ── Summary ───────────────────────────────────────────────────
 TOTAL=$((SECONDS - DEPLOY_START))
 

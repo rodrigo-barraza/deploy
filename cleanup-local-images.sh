@@ -17,23 +17,24 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 source "${SCRIPT_DIR}/colors.sh"
 
 # ── Config ────────────────────────────────────────────────────
-# Current service image names (the ones deploy-all.sh builds)
-CURRENT_SERVICES=(
-  vault-service
-  prism-service
-  tools-service
-  portal-service
-  lights-service
-  clock-crew-service
-  messages-service
-  prism-client
-  portal-client
-  rod-dev-client
-  lupos-bot
-  clock-crew-client
-  messages-client
-  lights-client
-)
+# Dynamically derive service list from projects.json (single source of truth)
+ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
+PROJECTS_JSON="${ROOT_DIR}/vault-service/projects.json"
+
+if [ ! -f "$PROJECTS_JSON" ]; then
+  fail "projects.json not found at ${PROJECTS_JSON}"
+fi
+
+# Extract all project IDs that have a deployTier (i.e. are deployable)
+IFS=$'\n' read -r -d '' -a CURRENT_SERVICES < <(node -e "
+  const s = require('$PROJECTS_JSON');
+  for (const p of s.projects) {
+    if (typeof p.deployTier === 'number' || p.id.endsWith('-service') || p.id.endsWith('-client') || p.id.endsWith('-bot'))
+      console.log(p.id);
+  }
+" && printf '\0')
+
+info "Found ${#CURRENT_SERVICES[@]} deployable services from projects.json"
 
 # Legacy image names from the old naming scheme — safe to remove entirely
 LEGACY_NAMES=(

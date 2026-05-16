@@ -277,6 +277,11 @@ if ! $DEPLOY_ONLY; then
 
   # ── If build-only, stop here ─────────────────────────────────
   if $BUILD_ONLY; then
+    # Clean up local SHA-tagged image (keep :latest for --changed-only)
+    if ! $DRY_RUN && [ "${GIT_SHA:-}" != "unknown" ] && [ -n "${GIT_SHA:-}" ]; then
+      docker rmi "$TAG_SHA" 2>/dev/null && info "Removed local tag ${TAG_SHA}" || true
+      docker image prune -f 2>/dev/null | grep -v 'Total reclaimed space: 0B' | sed 's/^/  /' || true
+    fi
     TOTAL=$((SECONDS - DEPLOY_START))
     echo ""
     printf '%s%s══════════════════════════════════════════════════════%s\n' "$GREEN" "$BOLD" "$RESET"
@@ -418,13 +423,22 @@ deploy_docker_api() {
   # Verify container running
   verify_container "docker -H $remote_host"
 
-  # Prune old images (keep :latest and :previous for rollback)
-  info "Pruning old images..."
+  # Prune old images on remote (keep :latest and :previous for rollback)
+  info "Pruning old images on ${DEPLOY_TARGET}..."
   docker -H "$remote_host" images "${IMAGE_NAME}" --format '{{.Tag}} {{.ID}}' \
     | grep -vE '^(latest|previous) ' \
     | awk '{print $2}' \
     | xargs -r docker -H "$remote_host" rmi 2>/dev/null || true
   docker -H "$remote_host" image prune -f 2>/dev/null | sed 's/^/  /' || true
+
+  # ── Clean up local build images ───────────────────────────────
+  # Keep only :latest (needed for --changed-only SHA label detection).
+  # Remove the SHA-tagged image and prune dangling layers.
+  step "Cleaning up local build images"
+  if [ "${GIT_SHA:-}" != "unknown" ] && [ -n "${GIT_SHA:-}" ]; then
+    docker rmi "$TAG_SHA" 2>/dev/null && info "Removed local tag ${TAG_SHA}" || true
+  fi
+  docker image prune -f 2>/dev/null | grep -v 'Total reclaimed space: 0B' | sed 's/^/  /' || true
 }
 
 # ══════════════════════════════════════════════════════════════
@@ -506,12 +520,21 @@ deploy_ssh() {
 
     verify_container "ssh $DEPLOY_SSH_HOST sudo ${DEPLOY_DOCKER_BIN}"
 
-    info "Pruning old images (keeping :previous for rollback)..."
+    info "Pruning old images on ${DEPLOY_TARGET} (keeping :previous for rollback)..."
     ssh "$DEPLOY_SSH_HOST" "sudo ${DEPLOY_DOCKER_BIN} images '${IMAGE_NAME}' --format '{{.Tag}} {{.ID}}' \
       | grep -vE '^(latest|previous) ' \
       | awk '{print \$2}' \
       | xargs -r sudo ${DEPLOY_DOCKER_BIN} rmi 2>/dev/null || true"
     ssh "$DEPLOY_SSH_HOST" "sudo ${DEPLOY_DOCKER_BIN} image prune -f" 2>/dev/null | sed 's/^/  /' || true
+
+    # ── Clean up local build images ───────────────────────────────
+    # Keep only :latest (needed for --changed-only SHA label detection).
+    # Remove the SHA-tagged image and prune dangling layers.
+    step "Cleaning up local build images"
+    if [ "${GIT_SHA:-}" != "unknown" ] && [ -n "${GIT_SHA:-}" ]; then
+      docker rmi "$TAG_SHA" 2>/dev/null && info "Removed local tag ${TAG_SHA}" || true
+    fi
+    docker image prune -f 2>/dev/null | grep -v 'Total reclaimed space: 0B' | sed 's/^/  /' || true
 
   else
     # ── SMB fallback ──────────────────────────────────────────
