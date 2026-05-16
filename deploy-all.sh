@@ -184,7 +184,23 @@ for arg in "$@"; do
   esac
 done
 
-
+# ── Detect projects.json changes (force vault-service deploy) ─
+# When --changed-only is set, check if vault-service/projects.json
+# was modified since the last vault-service image was built. If so,
+# vault-service MUST be redeployed before any other service so that
+# dependents pick up the latest config registry.
+VAULT_CONFIG_CHANGED=false
+if $CHANGED_ONLY; then
+  _vault_last_sha=$(docker inspect --format '{{index .Config.Labels "git.sha"}}' "vault-service:latest" 2>/dev/null || echo "")
+  if [ -n "$_vault_last_sha" ]; then
+    if ! (cd "${ROOT_DIR}/vault-service" && git diff --quiet "$_vault_last_sha" HEAD -- projects.json 2>/dev/null); then
+      VAULT_CONFIG_CHANGED=true
+    fi
+  else
+    # No previous vault image — treat config as changed
+    VAULT_CONFIG_CHANGED=true
+  fi
+fi
 
 # ── Service filter ────────────────────────────────────────────
 should_deploy() {
@@ -228,6 +244,12 @@ has_changes() {
 
   # If --changed-only is not set, always consider changed
   if ! $CHANGED_ONLY; then
+    return 0
+  fi
+
+  # Force vault-service when projects.json changed — the config
+  # registry must be live before any dependent services start.
+  if [ "$svc" = "vault-service" ] && $VAULT_CONFIG_CHANGED; then
     return 0
   fi
 
@@ -647,6 +669,9 @@ if [ -n "$SKIP_LIST" ]; then
 fi
 if $CHANGED_ONLY; then
   printf '  %sMode: changed-only (skipping unchanged services)%s\n' "$CYAN" "$RESET"
+fi
+if $VAULT_CONFIG_CHANGED; then
+  printf '  %s%s⚡ projects.json changed — vault-service will be force-deployed%s\n' "$YELLOW" "$BOLD" "$RESET"
 fi
 printf '%s%s══════════════════════════════════════════════════════════════%s\n' "$MAGENTA" "$BOLD" "$RESET"
 
