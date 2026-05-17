@@ -1081,7 +1081,7 @@ fi
 declare -A TIER_LABELS=(
   [0]="Tier 0 — Foundation"
   [1]="Tier 1 — Services & Clients"
-  [2]="Tier 2 — Clients & Bots"
+  [2]="Tier 2 — Bots"
 )
 
 # ══════════════════════════════════════════════════════════════
