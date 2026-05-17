@@ -2,14 +2,15 @@
 # ============================================================
 # Deploy All Services
 #
-# Two-phase pipeline:
-#   Phase 1 — BUILD: all services build in parallel (or sequential
-#             with --no-parallel). Builds across ALL tiers start
-#             simultaneously so total build time ≈ slowest build.
-#   Phase 2 — DEPLOY: services deploy tier-by-tier in order.
-#             Each tier waits only for its own builds to finish
-#             before deploying (earlier tiers may deploy while
-#             later tiers are still building).
+# Three-phase pipeline:
+#   Phase 1 — BUILD + TRANSFER: all services build in parallel.
+#             As each build completes, its image transfer to the
+#             target device starts immediately (pipeline parallelism).
+#             Total time ≈ slowest build + its transfer.
+#   Phase 2 — RESTART: tier-by-tier in dependency order.
+#             Each tier waits for its transfers to finish,
+#             restarts containers, then health-gates before
+#             proceeding to the next tier.
 #
 # Tiers are auto-derived from vault-service/projects.json:
 #   0. Foundation   — secret store (must be up first)
@@ -39,7 +40,7 @@
 set -euo pipefail
 
 # Clean up semaphore FIFO on exit
-cleanup() { exec 7>&- 2>/dev/null; rm -f "${LOG_DIR:-.deploy-logs}/.build-semaphore" 2>/dev/null; rm -rf "${LOG_DIR:-.deploy-logs}"/.health-* 2>/dev/null; }
+cleanup() { exec 7>&- 2>/dev/null; rm -f "${LOG_DIR:-.deploy-logs}/.build-semaphore" 2>/dev/null; rm -rf "${LOG_DIR:-.deploy-logs}"/.health-* 2>/dev/null; rm -f "${LOG_DIR:-.deploy-logs}"/*.pid 2>/dev/null; }
 trap cleanup EXIT
 
 # ── Config ────────────────────────────────────────────────────
@@ -352,7 +353,7 @@ run_phase() {
   # automatically (via lib.sh). Services using pre-built images
   # (e.g. qbittorrent-service) don't — so we persist the SHA to
   # a marker file for has_changes() to use on subsequent runs.
-  if [ "$phase" = "deploy" ] && [ "$(cat "$status_file" 2>/dev/null)" = "OK" ]; then
+  if { [ "$phase" = "deploy" ] || [ "$phase" = "restart" ]; } && [ "$(cat "$status_file" 2>/dev/null)" = "OK" ]; then
     local current_sha
     current_sha=$(cd "$svc_dir" && git rev-parse HEAD 2>/dev/null || echo "")
     if [ -n "$current_sha" ]; then
@@ -361,8 +362,10 @@ run_phase() {
   fi
 }
 
-build_service()  { run_phase "$1" "$2" "build"  "--build-only";  }
-deploy_service() { run_phase "$1" "$2" "deploy" "--deploy-only"; }
+build_service()    { run_phase "$1" "$2" "build"    "--build-only";    }
+deploy_service()   { run_phase "$1" "$2" "deploy"   "--deploy-only";   }
+transfer_service() { run_phase "$1" "$2" "transfer" "--transfer-only"; }
+restart_service()  { run_phase "$1" "$2" "restart"  "--restart-only";  }
 
 # ── Build concurrency semaphore ───────────────────────────────
 # Uses a FIFO pipe as a counting semaphore to cap the number of
@@ -502,6 +505,197 @@ wait_builds() {
 
   if $any_failed; then
     warn "Some builds in ${tier_name} failed — check logs in ${LOG_DIR}/"
+  fi
+}
+
+# ── Fire eager transfers (non-blocking) ───────────────────────
+# For each service, launch a background job that polls for its
+# build to complete, then immediately starts transferring the
+# image. This overlaps transfers with builds still in progress.
+fire_transfers() {
+  local tier_name="$1"
+  shift
+  local services=("$@")
+
+  if $NO_PARALLEL; then
+    # In sequential mode, transfers happen inline during restart_tier
+    return 0
+  fi
+
+  for svc in "${services[@]}"; do
+    should_deploy "$svc" || continue
+
+    (
+      # Poll for build completion (status file appears when done)
+      while [ ! -f "${LOG_DIR}/${svc}.build.status" ]; do
+        sleep 1
+      done
+
+      # Only transfer if build succeeded
+      local build_status
+      build_status=$(cat "${LOG_DIR}/${svc}.build.status" 2>/dev/null || echo "UNKNOWN")
+      if [ "$build_status" != "OK" ]; then
+        echo "SKIP" > "${LOG_DIR}/${svc}.transfer.status"
+        exit 0
+      fi
+
+      transfer_service "$svc" "true"
+    ) &
+    echo "$!" > "${LOG_DIR}/${svc}.transfer.pid"
+  done
+}
+
+# ── Wait for a tier's transfers to finish ─────────────────────
+wait_transfers() {
+  local tier_name="$1"
+  shift
+  local services=("$@")
+
+  if $NO_PARALLEL; then
+    return 0
+  fi
+
+  local any_waiting=false
+  for svc in "${services[@]}"; do
+    if [ -f "${LOG_DIR}/${svc}.transfer.pid" ]; then
+      any_waiting=true
+      break
+    fi
+  done
+
+  if ! $any_waiting; then
+    return 0
+  fi
+
+  step "Waiting for ${tier_name} transfers to finish"
+
+  local any_failed=false
+  for svc in "${services[@]}"; do
+    local pid_file="${LOG_DIR}/${svc}.transfer.pid"
+    if [ ! -f "$pid_file" ]; then
+      continue
+    fi
+
+    local pid
+    pid=$(cat "$pid_file")
+    wait "$pid" || true
+
+    local status
+    status=$(cat "${LOG_DIR}/${svc}.transfer.status" 2>/dev/null || echo "UNKNOWN")
+    if [ "$status" = "OK" ]; then
+      ok "${svc} transferred successfully"
+    elif [ "$status" = "SKIP" ]; then
+      continue
+    else
+      fail "${svc} transfer failed → ${LOG_DIR}/${svc}.transfer.log"
+      any_failed=true
+    fi
+  done
+
+  if $any_failed; then
+    warn "Some transfers in ${tier_name} failed — check logs in ${LOG_DIR}/"
+  fi
+}
+
+# ── Restart a tier (compose up only — images already on target) ─
+restart_tier() {
+  local tier_name="$1"
+  shift
+  local services=("$@")
+
+  # Filter to only services whose transfer (or build in seq mode) succeeded
+  local filtered=()
+  for svc in "${services[@]}"; do
+    if ! should_deploy "$svc"; then
+      echo "SKIP" > "${LOG_DIR}/${svc}.deploy.status"
+      continue
+    fi
+
+    if $NO_PARALLEL; then
+      # Sequential mode: check build status (transfer hasn't run yet)
+      local build_status
+      build_status=$(cat "${LOG_DIR}/${svc}.build.status" 2>/dev/null || echo "SKIP")
+      if [ "$build_status" = "OK" ]; then
+        filtered+=("$svc")
+      elif [ "$build_status" = "FAIL" ]; then
+        fail "${svc}: build failed — skipping"
+        echo "FAIL" > "${LOG_DIR}/${svc}.deploy.status"
+      else
+        echo "SKIP" > "${LOG_DIR}/${svc}.deploy.status"
+      fi
+    else
+      # Parallel mode: check transfer status
+      local transfer_status
+      transfer_status=$(cat "${LOG_DIR}/${svc}.transfer.status" 2>/dev/null || echo "SKIP")
+      if [ "$transfer_status" = "OK" ]; then
+        filtered+=("$svc")
+      elif [ "$transfer_status" = "FAIL" ]; then
+        fail "${svc}: transfer failed — skipping"
+        echo "FAIL" > "${LOG_DIR}/${svc}.deploy.status"
+      else
+        echo "SKIP" > "${LOG_DIR}/${svc}.deploy.status"
+      fi
+    fi
+  done
+
+  if [ ${#filtered[@]} -eq 0 ]; then
+    info "No services to restart in ${tier_name}"
+    return 0
+  fi
+
+  step "Restarting ${tier_name}: ${filtered[*]}"
+
+  if $NO_PARALLEL || [ ${#filtered[@]} -eq 1 ]; then
+    for svc in "${filtered[@]}"; do
+      if $NO_PARALLEL; then
+        # Sequential: do full deploy (transfer + restart in one shot)
+        deploy_service "$svc" "false"
+        local status
+        status=$(cat "${LOG_DIR}/${svc}.deploy.status" 2>/dev/null || echo "UNKNOWN")
+      else
+        restart_service "$svc" "false"
+        local status
+        status=$(cat "${LOG_DIR}/${svc}.restart.status" 2>/dev/null || echo "UNKNOWN")
+        echo "$status" > "${LOG_DIR}/${svc}.deploy.status"
+      fi
+      if [ "$status" = "OK" ]; then
+        ok "${svc} restarted successfully"
+      elif [ "$status" = "FAIL" ]; then
+        fail "${svc} restart failed"
+        if [ "$tier_name" = "Tier 0 — Foundation" ]; then
+          fail "Vault restart failed — aborting all subsequent tiers"
+          return 1
+        fi
+      fi
+    done
+  else
+    # Parallel restart within tier
+    local pids=()
+    for svc in "${filtered[@]}"; do
+      restart_service "$svc" "true" &
+      pids+=("$!:$svc")
+    done
+
+    local any_failed=false
+    for entry in "${pids[@]}"; do
+      local pid="${entry%%:*}"
+      local svc="${entry##*:}"
+      wait "$pid" || true
+      local status
+      status=$(cat "${LOG_DIR}/${svc}.restart.status" 2>/dev/null || echo "UNKNOWN")
+      if [ "$status" = "OK" ]; then
+        ok "${svc} restarted successfully"
+        echo "OK" > "${LOG_DIR}/${svc}.deploy.status"
+      else
+        fail "${svc} restart failed → ${LOG_DIR}/${svc}.restart.log"
+        echo "FAIL" > "${LOG_DIR}/${svc}.deploy.status"
+        any_failed=true
+      fi
+    done
+
+    if $any_failed; then
+      warn "Some restarts in ${tier_name} failed — check logs in ${LOG_DIR}/"
+    fi
   fi
 }
 
@@ -683,7 +877,7 @@ DEPLOY_START=$SECONDS
 echo ""
 printf '%s%s══════════════════════════════════════════════════════════════%s\n' "$MAGENTA" "$BOLD" "$RESET"
 printf '%s%s  🚀  Deploy All Services%s\n' "$MAGENTA" "$BOLD" "$RESET"
-printf '  %sTwo-phase pipeline: build all → deploy in order%s\n' "$DIM" "$RESET"
+printf '  %sThree-phase pipeline: build → transfer → restart%s\n' "$DIM" "$RESET"
 if $DRY_RUN; then
   printf '%s%s  ⚠  DRY RUN — no changes will be made%s\n' "$YELLOW" "$BOLD" "$RESET"
 fi
@@ -793,9 +987,21 @@ for tier in $(seq 0 "$MAX_TIER"); do
   fi
 done
 
+# Fire eager transfers — each polls for its own build, then
+# starts transferring immediately. This overlaps image transfers
+# with builds still in progress (pipeline parallelism).
+for tier in $(seq 0 "$MAX_TIER"); do
+  tier_label="${TIER_LABELS[$tier]:-Tier $tier}"
+  # shellcheck disable=SC2206
+  tier_svcs=(${TIER_SERVICES[$tier]})
+  if [ ${#tier_svcs[@]} -gt 0 ]; then
+    fire_transfers "$tier_label" "${tier_svcs[@]}"
+  fi
+done
+
 if ! $NO_PARALLEL; then
   echo ""
-  info "All builds launched — waiting will happen per-tier before deploy"
+  info "All builds + transfers launched — transfers start as builds complete"
 fi
 
 # ══════════════════════════════════════════════════════════════
@@ -883,12 +1089,12 @@ if ! $DRY_RUN && [ ${#DOCKER_DEVICES[@]} -gt 1 ]; then
 fi
 
 # ══════════════════════════════════════════════════════════════
-# PHASE 2 — WAIT & DEPLOY IN ORDER
+# PHASE 2 — WAIT & RESTART IN ORDER
 # ══════════════════════════════════════════════════════════════
 echo ""
 printf '%s%s┌──────────────────────────────────────────────────────────┐%s\n' "$GREEN" "$BOLD" "$RESET"
-printf '%s%s│  PHASE 2 — DEPLOY                                       │%s\n' "$GREEN" "$BOLD" "$RESET"
-printf '%s%s│  Transfer & restart tier-by-tier in dependency order     │%s\n' "$GREEN" "$BOLD" "$RESET"
+printf '%s%s│  PHASE 2 — RESTART                                      │%s\n' "$GREEN" "$BOLD" "$RESET"
+printf '%s%s│  Wait for transfers, then restart tier-by-tier           │%s\n' "$GREEN" "$BOLD" "$RESET"
 printf '%s%s└──────────────────────────────────────────────────────────┘%s\n' "$GREEN" "$BOLD" "$RESET"
 
 
@@ -901,8 +1107,12 @@ for tier in $(seq 0 "$MAX_TIER"); do
   fi
 
   header "━━━ ${tier_label} ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  if ! deploy_tier "$tier_label" "${tier_svcs[@]}"; then
-    # Tier 0 failure is fatal — vault must succeed
+
+  # Wait for this tier's transfers to land on the target
+  wait_transfers "$tier_label" "${tier_svcs[@]}"
+
+  # Restart containers (images are already on target)
+  if ! restart_tier "$tier_label" "${tier_svcs[@]}"; then
     if [ "$tier" -eq 0 ]; then
       fail "Aborting deployment — foundation tier failed"
       exit 1
@@ -910,7 +1120,7 @@ for tier in $(seq 0 "$MAX_TIER"); do
   fi
 
   # Health-gate: wait for this tier's services to become healthy
-  # before deploying the next tier (skip for the last tier).
+  # before restarting the next tier (skip for the last tier).
   if [ "$tier" -lt "$MAX_TIER" ] && ! $DRY_RUN; then
     wait_tier_healthy "$tier_label" "${tier_svcs[@]}"
   fi

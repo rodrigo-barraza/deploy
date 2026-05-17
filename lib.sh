@@ -22,6 +22,8 @@
 #   (default)          — full pipeline: validate → pull → build → deploy
 #   --build-only       — validate → pull → build (no deploy)
 #   --deploy-only      — deploy only (skip validate/pull/build)
+#   --transfer-only    — transfer image to target (no restart)
+#   --restart-only     — restart container on target (no transfer)
 #
 # Usage:
 #   npm run deploy              # full deploy
@@ -96,16 +98,26 @@ SKIP_PULL=false
 NO_CACHE=""
 BUILD_ONLY=false
 DEPLOY_ONLY=false
+TRANSFER_ONLY=false
+RESTART_ONLY=false
 
 for arg in "$@"; do
   case "$arg" in
-    --dry-run)      DRY_RUN=true ;;
-    --skip-pull)    SKIP_PULL=true ;;
-    --no-cache)     NO_CACHE="--no-cache" ;;
-    --build-only)   BUILD_ONLY=true ;;
-    --deploy-only)  DEPLOY_ONLY=true ;;
+    --dry-run)        DRY_RUN=true ;;
+    --skip-pull)      SKIP_PULL=true ;;
+    --no-cache)       NO_CACHE="--no-cache" ;;
+    --build-only)     BUILD_ONLY=true ;;
+    --deploy-only)    DEPLOY_ONLY=true ;;
+    --transfer-only)  TRANSFER_ONLY=true ;;
+    --restart-only)   RESTART_ONLY=true ;;
   esac
 done
+
+# --transfer-only and --restart-only are sub-modes of deploy
+# (they skip the build phase just like --deploy-only)
+if $TRANSFER_ONLY || $RESTART_ONLY; then
+  DEPLOY_ONLY=true
+fi
 
 # ── Colors & logging (shared) ─────────────────────────────────
 DEPLOY_KIT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -122,6 +134,10 @@ echo ""
 printf '%s%s══════════════════════════════════════════════════════%s\n' "$CYAN" "$BOLD" "$RESET"
 if $BUILD_ONLY; then
   printf '%s%s  %s — Build%s\n' "$CYAN" "$BOLD" "$DISPLAY_NAME" "$RESET"
+elif $TRANSFER_ONLY; then
+  printf '%s%s  %s — Transfer to %s%s\n' "$CYAN" "$BOLD" "$DISPLAY_NAME" "$DEPLOY_TARGET" "$RESET"
+elif $RESTART_ONLY; then
+  printf '%s%s  %s — Restart on %s%s\n' "$CYAN" "$BOLD" "$DISPLAY_NAME" "$DEPLOY_TARGET" "$RESET"
 elif $DEPLOY_ONLY; then
   printf '%s%s  %s — Deploy to %s%s\n' "$CYAN" "$BOLD" "$DISPLAY_NAME" "$DEPLOY_TARGET" "$RESET"
 else
@@ -343,7 +359,6 @@ verify_container() {
 # ══════════════════════════════════════════════════════════════
 deploy_docker_api() {
   local remote_host="$DEPLOY_DOCKER_API"
-  step "Deploying via Docker API → ${remote_host} (${DEPLOY_TARGET})"
 
   if $DRY_RUN; then
     info "(skipped — dry run)"
@@ -356,89 +371,99 @@ deploy_docker_api() {
   fi
   ok "Docker API at ${remote_host} reachable"
 
-  # Preserve previous image for rollback
-  PREV_TAG="${IMAGE_NAME}:previous"
-  HAS_CURRENT=$(docker -H "$remote_host" images "$TAG_LATEST" --format '{{.ID}}' 2>/dev/null || true)
-  if [ -n "$HAS_CURRENT" ]; then
-    info "Tagging current :latest as :previous for rollback..."
-    docker -H "$remote_host" tag "$TAG_LATEST" "$PREV_TAG" 2>/dev/null || true
-    ok "Rollback image saved as ${PREV_TAG}"
-  fi
+  # ── Transfer sub-phase ────────────────────────────────────────
+  if ! $RESTART_ONLY; then
+    step "Transferring image via Docker API → ${remote_host} (${DEPLOY_TARGET})"
 
-  # Transfer image
-  TRANSFER_START=$SECONDS
-  info "Piping image to remote Docker daemon..."
-  docker save "$TAG_LATEST" | $GZIP_CMD | docker -H "$remote_host" load
-  ok "Image transferred in $((SECONDS - TRANSFER_START))s"
-
-  # Stage .env next to docker-compose.yml so env_file: .env resolves
-  local staged_env=false
-  if [ "$SKIP_ENV_DEPLOY" != "true" ] && [ -f "$DEPLOY_ENV" ]; then
-    # Back up existing .env if present (don't clobber local dev config)
-    [ -f "${SCRIPT_DIR}/.env" ] && cp "${SCRIPT_DIR}/.env" "${SCRIPT_DIR}/.env.pre-deploy"
-    cp "$DEPLOY_ENV" "${SCRIPT_DIR}/.env"
-    staged_env=true
-    ok ".env staged for compose"
-  fi
-
-  # Build compose file flags — stack device-specific override if present
-  local compose_files="-f ${SCRIPT_DIR}/docker-compose.yml"
-  local override_file="${SCRIPT_DIR}/docker-compose.${DEPLOY_TARGET}.yml"
-  if [ -f "$override_file" ]; then
-    compose_files="$compose_files -f $override_file"
-    info "Using device override: docker-compose.${DEPLOY_TARGET}.yml"
-  fi
-
-  # Restart container via local compose targeting remote daemon
-  info "Restarting container..."
-  set +e
-  COMPOSE_OUTPUT=$(DOCKER_HOST="$remote_host" docker compose \
-    $compose_files \
-    down --remove-orphans 2>&1)
-  COMPOSE_OUTPUT+=$'\n'
-  COMPOSE_OUTPUT+=$(DOCKER_HOST="$remote_host" docker compose \
-    $compose_files \
-    up -d 2>&1)
-  COMPOSE_EXIT=$?
-  set -e
-
-  echo "$COMPOSE_OUTPUT" | sed 's/^/ /'
-
-  # Restore original .env
-  if $staged_env; then
-    if [ -f "${SCRIPT_DIR}/.env.pre-deploy" ]; then
-      mv "${SCRIPT_DIR}/.env.pre-deploy" "${SCRIPT_DIR}/.env"
-    else
-      rm -f "${SCRIPT_DIR}/.env"
+    # Preserve previous image for rollback
+    PREV_TAG="${IMAGE_NAME}:previous"
+    HAS_CURRENT=$(docker -H "$remote_host" images "$TAG_LATEST" --format '{{.ID}}' 2>/dev/null || true)
+    if [ -n "$HAS_CURRENT" ]; then
+      info "Tagging current :latest as :previous for rollback..."
+      docker -H "$remote_host" tag "$TAG_LATEST" "$PREV_TAG" 2>/dev/null || true
+      ok "Rollback image saved as ${PREV_TAG}"
     fi
+
+    # Transfer image
+    TRANSFER_START=$SECONDS
+    info "Piping image to remote Docker daemon..."
+    docker save "$TAG_LATEST" | $GZIP_CMD | docker -H "$remote_host" load
+    ok "Image transferred in $((SECONDS - TRANSFER_START))s"
   fi
 
-  if echo "$COMPOSE_OUTPUT" | grep -qiE 'could not find an available.*address pool|port is already allocated|driver failed programming'; then
-    fail "Container failed to start — Docker infrastructure error detected"
-  fi
-  if [ "$COMPOSE_EXIT" -ne 0 ]; then
-    fail "Container restart failed (exit ${COMPOSE_EXIT})"
-  fi
+  # ── Restart sub-phase ─────────────────────────────────────────
+  if ! $TRANSFER_ONLY; then
+    step "Restarting container via Docker API → ${remote_host}"
 
-  # Verify container running
-  verify_container "docker -H $remote_host"
+    # Stage .env next to docker-compose.yml so env_file: .env resolves
+    local staged_env=false
+    if [ "$SKIP_ENV_DEPLOY" != "true" ] && [ -f "$DEPLOY_ENV" ]; then
+      # Back up existing .env if present (don't clobber local dev config)
+      [ -f "${SCRIPT_DIR}/.env" ] && cp "${SCRIPT_DIR}/.env" "${SCRIPT_DIR}/.env.pre-deploy"
+      cp "$DEPLOY_ENV" "${SCRIPT_DIR}/.env"
+      staged_env=true
+      ok ".env staged for compose"
+    fi
 
-  # Prune old images on remote (keep :latest and :previous for rollback)
-  info "Pruning old images on ${DEPLOY_TARGET}..."
-  docker -H "$remote_host" images "${IMAGE_NAME}" --format '{{.Tag}} {{.ID}}' \
-    | grep -vE '^(latest|previous) ' \
-    | awk '{print $2}' \
-    | xargs -r docker -H "$remote_host" rmi 2>/dev/null || true
-  docker -H "$remote_host" image prune -f 2>/dev/null | sed 's/^/  /' || true
+    # Build compose file flags — stack device-specific override if present
+    local compose_files="-f ${SCRIPT_DIR}/docker-compose.yml"
+    local override_file="${SCRIPT_DIR}/docker-compose.${DEPLOY_TARGET}.yml"
+    if [ -f "$override_file" ]; then
+      compose_files="$compose_files -f $override_file"
+      info "Using device override: docker-compose.${DEPLOY_TARGET}.yml"
+    fi
 
-  # ── Clean up local build images ───────────────────────────────
-  # Keep only :latest (needed for --changed-only SHA label detection).
-  # Remove the SHA-tagged image and prune dangling layers.
-  step "Cleaning up local build images"
-  if [ "${GIT_SHA:-}" != "unknown" ] && [ -n "${GIT_SHA:-}" ]; then
-    docker rmi "$TAG_SHA" 2>/dev/null && info "Removed local tag ${TAG_SHA}" || true
+    # Restart container via local compose targeting remote daemon
+    info "Restarting container..."
+    set +e
+    COMPOSE_OUTPUT=$(DOCKER_HOST="$remote_host" docker compose \
+      $compose_files \
+      down --remove-orphans 2>&1)
+    COMPOSE_OUTPUT+=$'\n'
+    COMPOSE_OUTPUT+=$(DOCKER_HOST="$remote_host" docker compose \
+      $compose_files \
+      up -d 2>&1)
+    COMPOSE_EXIT=$?
+    set -e
+
+    echo "$COMPOSE_OUTPUT" | sed 's/^/ /'
+
+    # Restore original .env
+    if $staged_env; then
+      if [ -f "${SCRIPT_DIR}/.env.pre-deploy" ]; then
+        mv "${SCRIPT_DIR}/.env.pre-deploy" "${SCRIPT_DIR}/.env"
+      else
+        rm -f "${SCRIPT_DIR}/.env"
+      fi
+    fi
+
+    if echo "$COMPOSE_OUTPUT" | grep -qiE 'could not find an available.*address pool|port is already allocated|driver failed programming'; then
+      fail "Container failed to start — Docker infrastructure error detected"
+    fi
+    if [ "$COMPOSE_EXIT" -ne 0 ]; then
+      fail "Container restart failed (exit ${COMPOSE_EXIT})"
+    fi
+
+    # Verify container running
+    verify_container "docker -H $remote_host"
+
+    # Prune old images on remote (keep :latest and :previous for rollback)
+    info "Pruning old images on ${DEPLOY_TARGET}..."
+    docker -H "$remote_host" images "${IMAGE_NAME}" --format '{{.Tag}} {{.ID}}' \
+      | grep -vE '^(latest|previous) ' \
+      | awk '{print $2}' \
+      | xargs -r docker -H "$remote_host" rmi 2>/dev/null || true
+    docker -H "$remote_host" image prune -f 2>/dev/null | sed 's/^/  /' || true
+
+    # ── Clean up local build images ───────────────────────────────
+    # Keep only :latest (needed for --changed-only SHA label detection).
+    # Remove the SHA-tagged image and prune dangling layers.
+    step "Cleaning up local build images"
+    if [ "${GIT_SHA:-}" != "unknown" ] && [ -n "${GIT_SHA:-}" ]; then
+      docker rmi "$TAG_SHA" 2>/dev/null && info "Removed local tag ${TAG_SHA}" || true
+    fi
+    docker image prune -f 2>/dev/null | grep -v 'Total reclaimed space: 0B' | sed 's/^/  /' || true
   fi
-  docker image prune -f 2>/dev/null | grep -v 'Total reclaimed space: 0B' | sed 's/^/  /' || true
 }
 
 # ══════════════════════════════════════════════════════════════
@@ -461,80 +486,94 @@ deploy_ssh() {
   done
 
   if $HAS_SSH; then
-    step "Deploying via SSH → ${DEPLOY_SSH_HOST} (${DEPLOY_TARGET})"
 
     if $DRY_RUN; then
       info "(skipped — dry run)"
       return 0
     fi
 
-    ssh "$DEPLOY_SSH_HOST" "mkdir -p '${DEPLOY_COMPOSE_DIR}' 2>/dev/null || sudo mkdir -p '${DEPLOY_COMPOSE_DIR}'"
+    # ── Transfer sub-phase ────────────────────────────────────────
+    if ! $RESTART_ONLY; then
+      step "Transferring image via SSH → ${DEPLOY_SSH_HOST} (${DEPLOY_TARGET})"
 
-    info "Syncing docker-compose.yml..."
-    cat "${SCRIPT_DIR}/docker-compose.yml" | ssh "$DEPLOY_SSH_HOST" "cat > '${DEPLOY_COMPOSE_DIR}/docker-compose.yml'"
+      ssh "$DEPLOY_SSH_HOST" "mkdir -p '${DEPLOY_COMPOSE_DIR}' 2>/dev/null || sudo mkdir -p '${DEPLOY_COMPOSE_DIR}'"
 
-    # Sync device-specific compose override if present
-    local remote_compose_cmd="compose -f docker-compose.yml"
-    local override_file="${SCRIPT_DIR}/docker-compose.${DEPLOY_TARGET}.yml"
-    if [ -f "$override_file" ]; then
-      info "Syncing device override: docker-compose.${DEPLOY_TARGET}.yml..."
-      cat "$override_file" | ssh "$DEPLOY_SSH_HOST" "cat > '${DEPLOY_COMPOSE_DIR}/docker-compose.${DEPLOY_TARGET}.yml'"
-      remote_compose_cmd="compose -f docker-compose.yml -f docker-compose.${DEPLOY_TARGET}.yml"
+      info "Syncing docker-compose.yml..."
+      cat "${SCRIPT_DIR}/docker-compose.yml" | ssh "$DEPLOY_SSH_HOST" "cat > '${DEPLOY_COMPOSE_DIR}/docker-compose.yml'"
+
+      # Sync device-specific compose override if present
+      local override_file="${SCRIPT_DIR}/docker-compose.${DEPLOY_TARGET}.yml"
+      if [ -f "$override_file" ]; then
+        info "Syncing device override: docker-compose.${DEPLOY_TARGET}.yml..."
+        cat "$override_file" | ssh "$DEPLOY_SSH_HOST" "cat > '${DEPLOY_COMPOSE_DIR}/docker-compose.${DEPLOY_TARGET}.yml'"
+      fi
+
+      if [ "$SKIP_ENV_DEPLOY" != "true" ] && [ -f "$DEPLOY_ENV" ]; then
+        info "Syncing .env.deploy → .env..."
+        cat "$DEPLOY_ENV" | ssh "$DEPLOY_SSH_HOST" "cat > '${DEPLOY_COMPOSE_DIR}/.env'"
+        ok ".env synced"
+      fi
+
+      if type EXTRA_SSH_SYNC &>/dev/null; then
+        EXTRA_SSH_SYNC
+      fi
+
+      # Preserve previous image for rollback
+      PREV_TAG="${IMAGE_NAME}:previous"
+      HAS_CURRENT=$(ssh "$DEPLOY_SSH_HOST" "sudo ${DEPLOY_DOCKER_BIN} images '${TAG_LATEST}' --format '{{.ID}}'" 2>/dev/null || true)
+      if [ -n "$HAS_CURRENT" ]; then
+        info "Tagging current :latest as :previous for rollback..."
+        ssh "$DEPLOY_SSH_HOST" "sudo ${DEPLOY_DOCKER_BIN} tag '${TAG_LATEST}' '${PREV_TAG}'" 2>/dev/null || true
+        ok "Rollback image saved as ${PREV_TAG}"
+      fi
+
+      TRANSFER_START=$SECONDS
+      info "Piping image over SSH (this may take a moment)..."
+      docker save "$TAG_LATEST" | $GZIP_CMD | ssh "$DEPLOY_SSH_HOST" "gunzip | sudo ${DEPLOY_DOCKER_BIN} load"
+      ok "Image transferred in $((SECONDS - TRANSFER_START))s"
     fi
 
-    if [ "$SKIP_ENV_DEPLOY" != "true" ] && [ -f "$DEPLOY_ENV" ]; then
-      info "Syncing .env.deploy → .env..."
-      cat "$DEPLOY_ENV" | ssh "$DEPLOY_SSH_HOST" "cat > '${DEPLOY_COMPOSE_DIR}/.env'"
-      ok ".env synced"
+    # ── Restart sub-phase ─────────────────────────────────────────
+    if ! $TRANSFER_ONLY; then
+      step "Restarting container on ${DEPLOY_SSH_HOST}"
+
+      # Build the compose command (need override detection even if transfer was separate)
+      local remote_compose_cmd="compose -f docker-compose.yml"
+      local override_file="${SCRIPT_DIR}/docker-compose.${DEPLOY_TARGET}.yml"
+      if [ -f "$override_file" ]; then
+        remote_compose_cmd="compose -f docker-compose.yml -f docker-compose.${DEPLOY_TARGET}.yml"
+      fi
+
+      info "Restarting container..."
+      COMPOSE_OUTPUT=$(ssh "$DEPLOY_SSH_HOST" "cd '${DEPLOY_COMPOSE_DIR}' && sudo ${DEPLOY_DOCKER_BIN} ${remote_compose_cmd} down --remove-orphans 2>&1 && sudo ${DEPLOY_DOCKER_BIN} ${remote_compose_cmd} up -d 2>&1" 2>&1)
+      COMPOSE_EXIT=$?
+      echo "$COMPOSE_OUTPUT" | sed 's/^/ /'
+
+      if echo "$COMPOSE_OUTPUT" | grep -qiE 'could not find an available.*address pool|port is already allocated|driver failed programming'; then
+        fail "Container failed to start — Docker infrastructure error detected"
+      fi
+      if [ "$COMPOSE_EXIT" -ne 0 ]; then
+        fail "Container restart failed (exit ${COMPOSE_EXIT})"
+      fi
+
+      verify_container "ssh $DEPLOY_SSH_HOST sudo ${DEPLOY_DOCKER_BIN}"
+
+      info "Pruning old images on ${DEPLOY_TARGET} (keeping :previous for rollback)..."
+      ssh "$DEPLOY_SSH_HOST" "sudo ${DEPLOY_DOCKER_BIN} images '${IMAGE_NAME}' --format '{{.Tag}} {{.ID}}' \
+        | grep -vE '^(latest|previous) ' \
+        | awk '{print \$2}' \
+        | xargs -r sudo ${DEPLOY_DOCKER_BIN} rmi 2>/dev/null || true"
+      ssh "$DEPLOY_SSH_HOST" "sudo ${DEPLOY_DOCKER_BIN} image prune -f" 2>/dev/null | sed 's/^/  /' || true
+
+      # ── Clean up local build images ───────────────────────────────
+      # Keep only :latest (needed for --changed-only SHA label detection).
+      # Remove the SHA-tagged image and prune dangling layers.
+      step "Cleaning up local build images"
+      if [ "${GIT_SHA:-}" != "unknown" ] && [ -n "${GIT_SHA:-}" ]; then
+        docker rmi "$TAG_SHA" 2>/dev/null && info "Removed local tag ${TAG_SHA}" || true
+      fi
+      docker image prune -f 2>/dev/null | grep -v 'Total reclaimed space: 0B' | sed 's/^/  /' || true
     fi
-
-    if type EXTRA_SSH_SYNC &>/dev/null; then
-      EXTRA_SSH_SYNC
-    fi
-
-    # Preserve previous image for rollback
-    PREV_TAG="${IMAGE_NAME}:previous"
-    HAS_CURRENT=$(ssh "$DEPLOY_SSH_HOST" "sudo ${DEPLOY_DOCKER_BIN} images '${TAG_LATEST}' --format '{{.ID}}'" 2>/dev/null || true)
-    if [ -n "$HAS_CURRENT" ]; then
-      info "Tagging current :latest as :previous for rollback..."
-      ssh "$DEPLOY_SSH_HOST" "sudo ${DEPLOY_DOCKER_BIN} tag '${TAG_LATEST}' '${PREV_TAG}'" 2>/dev/null || true
-      ok "Rollback image saved as ${PREV_TAG}"
-    fi
-
-    TRANSFER_START=$SECONDS
-    info "Piping image over SSH (this may take a moment)..."
-    docker save "$TAG_LATEST" | $GZIP_CMD | ssh "$DEPLOY_SSH_HOST" "gunzip | sudo ${DEPLOY_DOCKER_BIN} load"
-    ok "Image transferred in $((SECONDS - TRANSFER_START))s"
-
-    info "Restarting container..."
-    COMPOSE_OUTPUT=$(ssh "$DEPLOY_SSH_HOST" "cd '${DEPLOY_COMPOSE_DIR}' && sudo ${DEPLOY_DOCKER_BIN} ${remote_compose_cmd} down --remove-orphans 2>&1 && sudo ${DEPLOY_DOCKER_BIN} ${remote_compose_cmd} up -d 2>&1" 2>&1)
-    COMPOSE_EXIT=$?
-    echo "$COMPOSE_OUTPUT" | sed 's/^/ /'
-
-    if echo "$COMPOSE_OUTPUT" | grep -qiE 'could not find an available.*address pool|port is already allocated|driver failed programming'; then
-      fail "Container failed to start — Docker infrastructure error detected"
-    fi
-    if [ "$COMPOSE_EXIT" -ne 0 ]; then
-      fail "Container restart failed (exit ${COMPOSE_EXIT})"
-    fi
-
-    verify_container "ssh $DEPLOY_SSH_HOST sudo ${DEPLOY_DOCKER_BIN}"
-
-    info "Pruning old images on ${DEPLOY_TARGET} (keeping :previous for rollback)..."
-    ssh "$DEPLOY_SSH_HOST" "sudo ${DEPLOY_DOCKER_BIN} images '${IMAGE_NAME}' --format '{{.Tag}} {{.ID}}' \
-      | grep -vE '^(latest|previous) ' \
-      | awk '{print \$2}' \
-      | xargs -r sudo ${DEPLOY_DOCKER_BIN} rmi 2>/dev/null || true"
-    ssh "$DEPLOY_SSH_HOST" "sudo ${DEPLOY_DOCKER_BIN} image prune -f" 2>/dev/null | sed 's/^/  /' || true
-
-    # ── Clean up local build images ───────────────────────────────
-    # Keep only :latest (needed for --changed-only SHA label detection).
-    # Remove the SHA-tagged image and prune dangling layers.
-    step "Cleaning up local build images"
-    if [ "${GIT_SHA:-}" != "unknown" ] && [ -n "${GIT_SHA:-}" ]; then
-      docker rmi "$TAG_SHA" 2>/dev/null && info "Removed local tag ${TAG_SHA}" || true
-    fi
-    docker image prune -f 2>/dev/null | grep -v 'Total reclaimed space: 0B' | sed 's/^/  /' || true
 
   else
     # ── SMB fallback ──────────────────────────────────────────
@@ -587,7 +626,11 @@ fi
 TOTAL=$((SECONDS - DEPLOY_START))
 echo ""
 printf '%s%s══════════════════════════════════════════════════════%s\n' "$GREEN" "$BOLD" "$RESET"
-if $DEPLOY_ONLY; then
+if $TRANSFER_ONLY; then
+  printf '%s%s  ✅ Transfer complete in %ss%s\n' "$GREEN" "$BOLD" "$TOTAL" "$RESET"
+elif $RESTART_ONLY; then
+  printf '%s%s  ✅ Restart complete in %ss%s\n' "$GREEN" "$BOLD" "$TOTAL" "$RESET"
+elif $DEPLOY_ONLY; then
   printf '%s%s  ✅ Deploy complete in %ss%s\n' "$GREEN" "$BOLD" "$TOTAL" "$RESET"
 else
   printf '%s%s  ✅ Build & deploy complete in %ss%s\n' "$GREEN" "$BOLD" "$TOTAL" "$RESET"
