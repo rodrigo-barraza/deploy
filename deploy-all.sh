@@ -164,7 +164,7 @@ ONLY=""
 SKIP_LIST=""
 CHANGED_ONLY=false
 GROUP=""
-MAX_CONCURRENT_BUILDS=4   # Limit concurrent docker builds to prevent I/O saturation
+MAX_CONCURRENT_BUILDS=32  # Limit concurrent docker builds to prevent I/O saturation
 
 for arg in "$@"; do
   case "$arg" in
