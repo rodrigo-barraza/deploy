@@ -27,6 +27,8 @@
 #   npm run deploy -- --skip=lupos-bot,lights-service  # skip specific services
 #   npm run deploy -- --no-parallel        # disable parallel builds
 #   npm run deploy -- --max-builds=6       # max concurrent docker builds (default: 4)
+#   npm run deploy -- --compact-wsl        # compact WSL2 VHDX after pruning (reclaim Windows disk)
+#   npm run deploy -- --max-cache=15        # max BuildKit cache in GB before pre-build prune (default: 10)
 #
 # Group deploy (by category):
 #   npm run deploy -- --clients            # deploy all *-client services
@@ -163,9 +165,11 @@ NO_PARALLEL=false
 ONLY=""
 SKIP_LIST=""
 CHANGED_ONLY=false
+COMPACT_WSL=false
 GROUP=""
 MAX_CONCURRENT_BUILDS=32  # Limit concurrent docker builds to prevent I/O saturation
 MAX_CONCURRENT_SSH=6      # Limit concurrent SSH operations to prevent MaxSessions drop
+MAX_BUILD_CACHE_GB=10     # Max BuildKit cache in GB before pre-build prune (prevents VHDX bloat)
 for arg in "$@"; do
   case "$arg" in
     --dry-run)        DRY_RUN=true ;;
@@ -173,6 +177,7 @@ for arg in "$@"; do
     --no-cache)       NO_CACHE=true ;;
     --no-parallel)    NO_PARALLEL=true ;;
     --changed-only)   CHANGED_ONLY=true ;;
+    --compact-wsl)    COMPACT_WSL=true ;;
     --only=*)         ONLY="${arg#--only=}" ;;
     --skip=*)         SKIP_LIST="${arg#--skip=}" ;;
     --group=*)        GROUP="${arg#--group=}" ;;
@@ -181,6 +186,7 @@ for arg in "$@"; do
     --bots)           GROUP="${GROUP:+${GROUP},}bot" ;;
     --vault)          GROUP="${GROUP:+${GROUP},}vault" ;;
     --max-builds=*)   MAX_CONCURRENT_BUILDS="${arg#--max-builds=}" ;;
+    --max-cache=*)    MAX_BUILD_CACHE_GB="${arg#--max-cache=}" ;;
   esac
 done
 
@@ -1079,6 +1085,44 @@ declare -A TIER_LABELS=(
 )
 
 # ══════════════════════════════════════════════════════════════
+# PRE-BUILD — Build cache cap enforcement
+# BuildKit caches every RUN/COPY layer and grows unbounded.
+# On WSL2 this bloats the VHDX since it never auto-shrinks.
+# Enforce a cap BEFORE building to prevent accumulation.
+# ══════════════════════════════════════════════════════════════
+if ! $DRY_RUN; then
+  # Parse current build cache size in bytes
+  CACHE_SIZE_BYTES=$(docker system df --format '{{.Size}}' 2>/dev/null | tail -1 | awk '
+    /TB/ { printf "%.0f\n", $1 * 1024 * 1024 * 1024 * 1024; next }
+    /GB/ { printf "%.0f\n", $1 * 1024 * 1024 * 1024; next }
+    /MB/ { printf "%.0f\n", $1 * 1024 * 1024; next }
+    /kB/ { printf "%.0f\n", $1 * 1024; next }
+    /B/  { printf "%.0f\n", $1; next }
+    { print 0 }
+  ' || echo "0")
+  CACHE_MAX_BYTES=$((MAX_BUILD_CACHE_GB * 1024 * 1024 * 1024))
+  CACHE_SIZE_HUMAN=$(docker system df --format '{{.Size}}' 2>/dev/null | tail -1 || echo "unknown")
+
+  if [ "$CACHE_SIZE_BYTES" -gt "$CACHE_MAX_BYTES" ] 2>/dev/null; then
+    echo ""
+    printf '%s%s┌──────────────────────────────────────────────────────────┐%s\n' "$YELLOW" "$BOLD" "$RESET"
+    printf '%s%s│  PRE-BUILD — Build cache over %sGB cap (%s)          │%s\n' "$YELLOW" "$BOLD" "$MAX_BUILD_CACHE_GB" "$CACHE_SIZE_HUMAN" "$RESET"
+    printf '%s%s│  Pruning to prevent WSL2 VHDX growth                    │%s\n' "$YELLOW" "$BOLD" "$RESET"
+    printf '%s%s└──────────────────────────────────────────────────────────┘%s\n' "$YELLOW" "$BOLD" "$RESET"
+
+    step "Pruning build cache exceeding ${MAX_BUILD_CACHE_GB}GB cap (current: ${CACHE_SIZE_HUMAN})"
+    BUILDER_PRUNE_OUTPUT=$(docker builder prune -f --keep-storage "${CACHE_MAX_BYTES}" 2>/dev/null || true)
+    BUILDER_RECLAIMED=$(echo "$BUILDER_PRUNE_OUTPUT" | grep 'Total reclaimed space' || echo "0B reclaimed")
+    ok "Pre-build cache pruned — ${BUILDER_RECLAIMED}"
+
+    # Also prune dangling images while we're at it
+    docker image prune -f 2>/dev/null | grep -v 'Total reclaimed space: 0B' | sed 's/^/  /' || true
+  else
+    info "Build cache: ${CACHE_SIZE_HUMAN} (under ${MAX_BUILD_CACHE_GB}GB cap)"
+  fi
+fi
+
+# ══════════════════════════════════════════════════════════════
 # PHASE 1 — BUILD ALL (fire all tiers simultaneously)
 # ══════════════════════════════════════════════════════════════
 echo ""
@@ -1241,13 +1285,14 @@ done
 # ══════════════════════════════════════════════════════════════
 # PHASE 3 — LOCAL IMAGE CLEANUP
 # Remove SHA-tagged images (keep only :latest per service for
-# --changed-only SHA label detection) and prune dangling layers.
+# --changed-only SHA label detection), prune dangling layers,
+# and clear BuildKit build cache to prevent WSL2 VHDX growth.
 # ══════════════════════════════════════════════════════════════
 if ! $DRY_RUN; then
   echo ""
   printf '%s%s┌──────────────────────────────────────────────────────────┐%s\n' "$YELLOW" "$BOLD" "$RESET"
   printf '%s%s│  PHASE 3 — LOCAL IMAGE CLEANUP                          │%s\n' "$YELLOW" "$BOLD" "$RESET"
-  printf '%s%s│  Remove stale SHA tags and prune dangling layers         │%s\n' "$YELLOW" "$BOLD" "$RESET"
+  printf '%s%s│  Remove stale tags, dangling layers, and build cache     │%s\n' "$YELLOW" "$BOLD" "$RESET"
   printf '%s%s└──────────────────────────────────────────────────────────┘%s\n' "$YELLOW" "$BOLD" "$RESET"
 
   CLEANED=0
@@ -1264,7 +1309,7 @@ if ! $DRY_RUN; then
     fi
   done
 
-  # Prune dangling images and build cache
+  # Prune dangling images
   PRUNE_OUTPUT=$(docker image prune -f 2>/dev/null || true)
   RECLAIMED=$(echo "$PRUNE_OUTPUT" | grep 'Total reclaimed space' || echo "0B reclaimed")
 
@@ -1272,6 +1317,44 @@ if ! $DRY_RUN; then
     ok "Removed ${CLEANED} stale local image tags — ${RECLAIMED}"
   else
     ok "No stale local images to clean"
+  fi
+
+  # ── Prune BuildKit build cache ──────────────────────────────
+  # This is the primary source of WSL2 VHDX growth. BuildKit caches
+  # every RUN/COPY layer across all 20+ service builds. Without this,
+  # the cache grows by hundreds of MB per deploy and never shrinks.
+  # Keep cache entries from the last 72h for rebuild speed; purge the rest.
+  step "Pruning BuildKit build cache (keeping last 72h)"
+  BUILD_CACHE_BEFORE=$(docker system df --format '{{.Size}}' 2>/dev/null | tail -1 || echo "unknown")
+  BUILDER_PRUNE_OUTPUT=$(docker builder prune -f --filter 'until=72h' 2>/dev/null || true)
+  BUILDER_RECLAIMED=$(echo "$BUILDER_PRUNE_OUTPUT" | grep 'Total reclaimed space' || echo "0B reclaimed")
+  ok "Build cache pruned — ${BUILDER_RECLAIMED}"
+
+  # ── Optional: compact WSL2 VHDX ─────────────────────────────
+  # Docker data lives in WSL2's ext4.vhdx which grows but never
+  # auto-shrinks. After pruning, reclaim Windows disk space by
+  # compacting the VHDX via PowerShell. Use --compact-wsl flag.
+  if $COMPACT_WSL; then
+    step "Compacting WSL2 virtual disk (VHDX)"
+    # Find the Docker Desktop VHDX path
+    VHDX_PATH=$(wslpath -w "$(find /mnt/c/Users/*/AppData/Local/Docker/wsl/disk -name 'docker_data.vhdx' 2>/dev/null | head -1)" 2>/dev/null || true)
+    if [ -z "$VHDX_PATH" ]; then
+      # Fallback: try the standard docker-desktop-data distro path
+      VHDX_PATH=$(powershell.exe -Command "(Get-ChildItem -Path \$env:LOCALAPPDATA\\Docker\\wsl\\disk -Filter 'docker_data.vhdx' -Recurse -ErrorAction SilentlyContinue | Select-Object -First 1).FullName" 2>/dev/null | tr -d '\r' || true)
+    fi
+    if [ -n "$VHDX_PATH" ]; then
+      info "VHDX: ${VHDX_PATH}"
+      info "Shutting down WSL to release locks..."
+      wsl.exe --shutdown 2>/dev/null || true
+      sleep 3
+      # Compact via PowerShell (no interactive diskpart needed)
+      powershell.exe -Command "Optimize-VHD -Path '${VHDX_PATH}' -Mode Full" 2>/dev/null && \
+        ok "VHDX compacted successfully" || \
+        warn "VHDX compaction failed — you may need to run as Administrator"
+    else
+      warn "Could not locate Docker VHDX — skipping compaction"
+      info "You can compact manually: wsl --shutdown && diskpart → select vdisk → compact vdisk"
+    fi
   fi
 fi
 

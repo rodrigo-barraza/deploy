@@ -178,6 +178,15 @@ ok "Removed ${REMOVED_LEGACY} legacy images (${FAILED_LEGACY} skipped)"
 step "Pruning dangling images"
 docker image prune -f 2>/dev/null | sed 's/^/  /' || true
 
+# ── Prune BuildKit build cache ────────────────────────────────
+# This is the primary source of WSL2 VHDX growth. BuildKit caches
+# every RUN/COPY layer across all service builds and accumulates
+# hundreds of MB per deploy without explicit pruning.
+step "Pruning BuildKit build cache (keeping last 72h)"
+BUILDER_PRUNE_OUTPUT=$(docker builder prune -f --filter 'until=72h' 2>/dev/null || true)
+BUILDER_RECLAIMED=$(echo "$BUILDER_PRUNE_OUTPUT" | grep 'Total reclaimed space' || echo "0B reclaimed")
+ok "Build cache pruned — ${BUILDER_RECLAIMED}"
+
 # ── Final summary ─────────────────────────────────────────────
 echo ""
 printf '%s%s══════════════════════════════════════════════════════%s\n' "$GREEN" "$BOLD" "$RESET"
