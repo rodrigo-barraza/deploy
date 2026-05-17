@@ -198,7 +198,8 @@ if ! $DEPLOY_ONLY; then
   # pinned by SHA in the lockfile — `npm install` alone won't
   # re-resolve them. We first run `npm update` on any git deps
   # to pull the latest commit, then a full install to reconcile.
-  # If the lockfile changed, auto-commit so Docker gets the fix.
+  # If the lockfile changed, we temporarily keep it modified for Docker,
+  # then revert it later to avoid polluting git history.
   if [ -f "package-lock.json" ] && ! $DRY_RUN; then
     step "Syncing dependencies"
 
@@ -220,14 +221,11 @@ if ! $DEPLOY_ONLY; then
     # to forward the host SSH agent for private git deps.
 
     if ! git diff --quiet package-lock.json 2>/dev/null; then
-      step "Lockfile was out of sync — committing and pushing fix"
-      git add package-lock.json
-      git commit -m "chore: regenerate package-lock.json" --no-verify 2>&1 | sed 's/^/  /'
-      git push origin HEAD 2>&1 | sed 's/^/  /'
-      GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
-      ok "Lockfile synced (now at ${GIT_SHA})"
+      step "Lockfile updated for Docker build (will be reverted after)"
+      LOCKFILE_WAS_MODIFIED=true
     else
       ok "Dependencies up to date"
+      LOCKFILE_WAS_MODIFIED=false
     fi
   fi
 
@@ -239,6 +237,9 @@ if ! $DEPLOY_ONLY; then
     else
       TEST_START=$SECONDS
       if ! (set -o pipefail; export CI=true; npm run test --prefix "${SCRIPT_DIR}" 2>&1 | sed 's/^/  /'); then
+        if [ "${LOCKFILE_WAS_MODIFIED:-false}" = "true" ]; then
+          git restore package-lock.json 2>/dev/null || git checkout package-lock.json 2>/dev/null || true
+        fi
         fail "Tests failed! Aborting deployment."
       fi
       ok "Tests passed in $((SECONDS - TEST_START))s"
@@ -280,6 +281,12 @@ if ! $DEPLOY_ONLY; then
       . 2>&1 | tail -${BUILD_TAIL_LINES} | sed 's/^/  /')
     BUILD_EXIT=$?
     set -e
+    
+    if [ "${LOCKFILE_WAS_MODIFIED:-false}" = "true" ]; then
+      info "Reverting package-lock.json to pre-build state..."
+      git restore package-lock.json 2>/dev/null || git checkout package-lock.json 2>/dev/null || true
+    fi
+
     if [ "$BUILD_EXIT" -ne 0 ]; then
       if [ "$BUILD_EXIT" -eq 124 ] || [ "$BUILD_EXIT" -eq 137 ]; then
         fail "Build timed out after ${BUILD_TIMEOUT}s"

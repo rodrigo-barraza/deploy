@@ -165,7 +165,7 @@ SKIP_LIST=""
 CHANGED_ONLY=false
 GROUP=""
 MAX_CONCURRENT_BUILDS=32  # Limit concurrent docker builds to prevent I/O saturation
-
+MAX_CONCURRENT_SSH=6      # Limit concurrent SSH operations to prevent MaxSessions drop
 for arg in "$@"; do
   case "$arg" in
     --dry-run)        DRY_RUN=true ;;
@@ -371,23 +371,30 @@ restart_service()  { run_phase "$1" "$2" "restart"  "--restart-only";  }
 # simultaneous docker builds to prevent CPU and I/O saturation.
 # Without this, 25+ concurrent builds can overwhelm the system.
 SEM_FIFO="${LOG_DIR}/.build-semaphore"
+SSH_SEM_FIFO="${LOG_DIR}/.ssh-semaphore"
 
 init_semaphore() {
-  rm -f "$SEM_FIFO"
+  rm -f "$SEM_FIFO" "$SSH_SEM_FIFO"
   mkfifo "$SEM_FIFO"
-  # Open a persistent read-write FD on the FIFO. This prevents EOF
-  # on readers — without a writer always open, readers past the
-  # initial token count get EOF and die under set -e.
+  mkfifo "$SSH_SEM_FIFO"
+  # Open a persistent read-write FD on the FIFOs.
   exec 7<>"$SEM_FIFO"
+  exec 8<>"$SSH_SEM_FIFO"
   # Pre-fill with N tokens
   local i
   for ((i = 0; i < MAX_CONCURRENT_BUILDS; i++)); do
     echo "x" >&7
   done
+  for ((i = 0; i < MAX_CONCURRENT_SSH; i++)); do
+    echo "x" >&8
+  done
 }
 
 sem_acquire() { read -r <&7; }
 sem_release() { echo "x" >&7; }
+
+sem_ssh_acquire() { read -r <&8; }
+sem_ssh_release() { echo "x" >&8; }
 
 # Wrapper: acquire semaphore → build → release
 build_service_throttled() {
@@ -396,6 +403,24 @@ build_service_throttled() {
   sem_acquire
   build_service "$svc" "$prefix"
   sem_release
+}
+
+# Wrapper: acquire semaphore → transfer → release
+transfer_service_throttled() {
+  local svc="$1"
+  local prefix="$2"
+  sem_ssh_acquire
+  transfer_service "$svc" "$prefix"
+  sem_ssh_release
+}
+
+# Wrapper: acquire semaphore → restart → release
+restart_service_throttled() {
+  local svc="$1"
+  local prefix="$2"
+  sem_ssh_acquire
+  restart_service "$svc" "$prefix"
+  sem_ssh_release
 }
 
 # ── Fire builds for a tier (non-blocking) ─────────────────────
@@ -538,7 +563,7 @@ fire_transfers() {
         exit 0
       fi
 
-      transfer_service "$svc" "true"
+      transfer_service_throttled "$svc" "true"
     ) &
     echo "$!" > "${LOG_DIR}/${svc}.transfer.pid"
   done
@@ -671,7 +696,7 @@ restart_tier() {
     # Parallel restart within tier
     local pids=()
     for svc in "${filtered[@]}"; do
-      restart_service "$svc" "true" &
+      restart_service_throttled "$svc" "true" &
       pids+=("$!:$svc")
     done
 
@@ -1041,7 +1066,7 @@ fi
 # ── Tier labels (descriptive names for output) ───────────────
 declare -A TIER_LABELS=(
   [0]="Tier 0 — Foundation"
-  [1]="Tier 1 — APIs & Services"
+  [1]="Tier 1 — Services & Clients"
   [2]="Tier 2 — Clients & Bots"
 )
 
@@ -1261,9 +1286,13 @@ for svc in "${ALL_SERVICES[@]}"; do
   case "$local_status" in
     OK)   printf '  %s✔ %s%s\n' "$svc_clr" "$svc" "$RESET"; PASS=$((PASS + 1)) ;;
     FAIL)
-      # Show build log if deploy log doesn't exist (failure was in build phase)
+      # Show correct log based on what actually failed
       if [ -f "${LOG_DIR}/${svc}.deploy.log" ]; then
         printf '  %s✖ %s%s  →  %s\n' "$RED" "$svc" "$RESET" "${LOG_DIR}/${svc}.deploy.log"
+      elif [ "$(cat "${LOG_DIR}/${svc}.restart.status" 2>/dev/null)" = "FAIL" ]; then
+        printf '  %s✖ %s%s  →  %s %s(restart failed)%s\n' "$RED" "$svc" "$RESET" "${LOG_DIR}/${svc}.restart.log" "$DIM" "$RESET"
+      elif [ "$(cat "${LOG_DIR}/${svc}.transfer.status" 2>/dev/null)" = "FAIL" ]; then
+        printf '  %s✖ %s%s  →  %s %s(transfer failed)%s\n' "$RED" "$svc" "$RESET" "${LOG_DIR}/${svc}.transfer.log" "$DIM" "$RESET"
       else
         printf '  %s✖ %s%s  →  %s %s(build failed)%s\n' "$RED" "$svc" "$RESET" "${LOG_DIR}/${svc}.build.log" "$DIM" "$RESET"
       fi
