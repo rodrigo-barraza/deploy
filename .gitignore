@@ -6,3 +6,6 @@
 
 # Deploy secrets (real values — use .env.deploy.example as template)
 .env.deploy
+
+# Test fixtures (separate repo checkouts)
+test-components-lib/
