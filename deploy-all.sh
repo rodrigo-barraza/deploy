@@ -23,6 +23,7 @@
 #   npm run deploy -- --skip-pull          # skip git pull
 #   npm run deploy -- --no-cache           # rebuild images from scratch
 #   npm run deploy -- --changed-only       # only build+deploy services with git changes
+#   npm run deploy -- --build-only          # build Docker images only (no transfer/restart)
 #   npm run deploy -- --only=prism-service,prism-client  # deploy specific services
 #   npm run deploy -- --skip=lupos-bot,lights-service  # skip specific services
 #   npm run deploy -- --no-parallel        # disable parallel builds
@@ -165,6 +166,7 @@ NO_PARALLEL=false
 ONLY=""
 SKIP_LIST=""
 CHANGED_ONLY=false
+BUILD_ONLY=false
 COMPACT_WSL=false
 GROUP=""
 MAX_CONCURRENT_BUILDS=32  # Limit concurrent docker builds to prevent I/O saturation
@@ -177,6 +179,7 @@ for arg in "$@"; do
     --no-cache)       NO_CACHE=true ;;
     --no-parallel)    NO_PARALLEL=true ;;
     --changed-only)   CHANGED_ONLY=true ;;
+    --build-only)     BUILD_ONLY=true ;;
     --compact-wsl)    COMPACT_WSL=true ;;
     --only=*)         ONLY="${arg#--only=}" ;;
     --skip=*)         SKIP_LIST="${arg#--skip=}" ;;
@@ -931,6 +934,9 @@ fi
 if $CHANGED_ONLY; then
   printf '  %sMode: changed-only (skipping unchanged services)%s\n' "$CYAN" "$RESET"
 fi
+if $BUILD_ONLY; then
+  printf '%s%s  ⚠  BUILD ONLY — no transfer or restart will be performed%s\n' "$YELLOW" "$BOLD" "$RESET"
+fi
 if $VAULT_CONFIG_CHANGED; then
   printf '  %s%s⚡ projects.json changed — vault-service will be force-deployed%s\n' "$YELLOW" "$BOLD" "$RESET"
 fi
@@ -1145,18 +1151,66 @@ done
 # Fire eager transfers — each polls for its own build, then
 # starts transferring immediately. This overlaps image transfers
 # with builds still in progress (pipeline parallelism).
-for tier in $(seq 0 "$MAX_TIER"); do
-  tier_label="${TIER_LABELS[$tier]:-Tier $tier}"
-  # shellcheck disable=SC2206
-  tier_svcs=(${TIER_SERVICES[$tier]})
-  if [ ${#tier_svcs[@]} -gt 0 ]; then
-    fire_transfers "$tier_label" "${tier_svcs[@]}"
-  fi
-done
+if ! $BUILD_ONLY; then
+  for tier in $(seq 0 "$MAX_TIER"); do
+    tier_label="${TIER_LABELS[$tier]:-Tier $tier}"
+    # shellcheck disable=SC2206
+    tier_svcs=(${TIER_SERVICES[$tier]})
+    if [ ${#tier_svcs[@]} -gt 0 ]; then
+      fire_transfers "$tier_label" "${tier_svcs[@]}"
+    fi
+  done
+fi
 
-if ! $NO_PARALLEL; then
+if ! $NO_PARALLEL && ! $BUILD_ONLY; then
   echo ""
   info "All builds + transfers launched — transfers start as builds complete"
+fi
+
+# ── BUILD_ONLY: wait for all builds, report, and exit ─────────
+if $BUILD_ONLY; then
+  echo ""
+  info "Build-only mode — waiting for all builds to complete..."
+
+  # Wait for all tier builds
+  for tier in $(seq 0 "$MAX_TIER"); do
+    tier_label="${TIER_LABELS[$tier]:-Tier $tier}"
+    # shellcheck disable=SC2206
+    tier_svcs=(${TIER_SERVICES[$tier]})
+    if [ ${#tier_svcs[@]} -gt 0 ]; then
+      wait_builds "$tier_label" "${tier_svcs[@]}"
+    fi
+  done
+
+  # Summary
+  TOTAL=$((SECONDS - DEPLOY_START))
+  echo ""
+  printf '%s%s══════════════════════════════════════════════════════════════%s\n' "$MAGENTA" "$BOLD" "$RESET"
+  printf '%s%s  🔨  Build Only — Summary%s\n' "$MAGENTA" "$BOLD" "$RESET"
+  printf '%s%s══════════════════════════════════════════════════════════════%s\n' "$MAGENTA" "$BOLD" "$RESET"
+
+  PASS=0
+  FAILED=0
+  SKIPPED=0
+
+  for svc in "${ALL_SERVICES[@]}"; do
+    local_status=$(cat "${LOG_DIR}/${svc}.build.status" 2>/dev/null || echo "SKIP")
+    svc_clr="${SVC_COLORS[$svc]:-$DIM}"
+    case "$local_status" in
+      OK)   printf '  %s✔ %s%s\n' "$svc_clr" "$svc" "$RESET"; PASS=$((PASS + 1)) ;;
+      FAIL) printf '  %s✖ %s%s  →  %s %s(build failed)%s\n' "$RED" "$svc" "$RESET" "${LOG_DIR}/${svc}.build.log" "$DIM" "$RESET"; FAILED=$((FAILED + 1)) ;;
+      *)    printf '  %s⊘ %s (skipped)%s\n' "$DIM" "$svc" "$RESET"; SKIPPED=$((SKIPPED + 1)) ;;
+    esac
+  done
+
+  echo ""
+  printf '  %s%s passed%s  %s%s failed%s  %s%s skipped%s\n' "$GREEN" "$PASS" "$RESET" "$RED" "$FAILED" "$RESET" "$DIM" "$SKIPPED" "$RESET"
+  printf '  %sTotal: %ss%s\n' "$DIM" "$TOTAL" "$RESET"
+  echo ""
+  printf '%s%s══════════════════════════════════════════════════════════════%s\n' "$MAGENTA" "$BOLD" "$RESET"
+
+  [ "$FAILED" -eq 0 ]
+  exit
 fi
 
 # ══════════════════════════════════════════════════════════════
