@@ -388,8 +388,18 @@ deploy_docker_api() {
     TRANSFER_START=$SECONDS
     info "Piping image to remote Docker daemon..."
     set +e
-    TRANSFER_OUTPUT=$( (set -o pipefail; docker save "$TAG_LATEST" | $GZIP_CMD | docker -H "$remote_host" load) 2>&1 )
-    TRANSFER_EXIT=$?
+    for _transfer_attempt in 1 2 3; do
+      TRANSFER_OUTPUT=$( (set -o pipefail; docker save "$TAG_LATEST" | $GZIP_CMD | docker -H "$remote_host" load) 2>&1 )
+      TRANSFER_EXIT=$?
+      if [ "$TRANSFER_EXIT" -eq 0 ]; then
+        break
+      fi
+      if [ "$_transfer_attempt" -lt 3 ]; then
+        _jitter=$(( (RANDOM % 5) + 3 ))
+        warn "Transfer failed (exit ${TRANSFER_EXIT}) — retrying in ${_jitter}s..."
+        sleep "$_jitter"
+      fi
+    done
     set -e
     if [ "$TRANSFER_EXIT" -ne 0 ]; then
       echo "$TRANSFER_OUTPUT" | sed 's/^/  /'
@@ -537,8 +547,18 @@ deploy_ssh() {
       TRANSFER_START=$SECONDS
       info "Piping image over SSH (this may take a moment)..."
       set +e
-      TRANSFER_OUTPUT=$( (set -o pipefail; docker save "$TAG_LATEST" | $GZIP_CMD | ssh "$DEPLOY_SSH_HOST" "gunzip | sudo ${DEPLOY_DOCKER_BIN} load") 2>&1 )
-      TRANSFER_EXIT=$?
+      for _transfer_attempt in 1 2 3; do
+        TRANSFER_OUTPUT=$( (set -o pipefail; docker save "$TAG_LATEST" | $GZIP_CMD | ssh "$DEPLOY_SSH_HOST" "gunzip | sudo ${DEPLOY_DOCKER_BIN} load") 2>&1 )
+        TRANSFER_EXIT=$?
+        if [ "$TRANSFER_EXIT" -eq 0 ]; then
+          break
+        fi
+        if [ "$_transfer_attempt" -lt 3 ]; then
+          _jitter=$(( (RANDOM % 5) + 3 ))
+          warn "Transfer failed (exit ${TRANSFER_EXIT}) — retrying in ${_jitter}s..."
+          sleep "$_jitter"
+        fi
+      done
       set -e
       if [ "$TRANSFER_EXIT" -ne 0 ]; then
         echo "$TRANSFER_OUTPUT" | sed 's/^/  /'

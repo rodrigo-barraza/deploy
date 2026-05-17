@@ -14,9 +14,8 @@
 #
 # Tiers are auto-derived from vault-service/projects.json:
 #   0. Foundation   — secret store (must be up first)
-#   1. APIs         — backend services
-#   2. Mid-tier     — services depending on tier-1
-#   3. Clients/Bots — frontends, dashboards, bots
+#   1. APIs/Clients — backend services and frontends
+#   2. Bots         — discord bots and background workers
 #
 # Usage:
 #   npm run deploy                         # full deploy
@@ -115,8 +114,8 @@ eval "$(node -e "
   for (const svc of s.projects) {
     let tier = svc.deployTier;
     if (typeof tier !== 'number') {
-      if (svc.id.endsWith('-service')) tier = 1;
-      else if (svc.id.endsWith('-client') || svc.id.endsWith('-bot')) tier = 2;
+      if (svc.id.endsWith('-service') || svc.id.endsWith('-client')) tier = 1;
+      else if (svc.id.endsWith('-bot')) tier = 2;
       else continue;
     }
     (tiers[tier] ??= []).push(svc.id);
