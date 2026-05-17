@@ -387,7 +387,14 @@ deploy_docker_api() {
     # Transfer image
     TRANSFER_START=$SECONDS
     info "Piping image to remote Docker daemon..."
-    docker save "$TAG_LATEST" | $GZIP_CMD | docker -H "$remote_host" load
+    set +e
+    TRANSFER_OUTPUT=$( (set -o pipefail; docker save "$TAG_LATEST" | $GZIP_CMD | docker -H "$remote_host" load) 2>&1 )
+    TRANSFER_EXIT=$?
+    set -e
+    if [ "$TRANSFER_EXIT" -ne 0 ]; then
+      echo "$TRANSFER_OUTPUT" | sed 's/^/  /'
+      fail "Image transfer failed (exit ${TRANSFER_EXIT})"
+    fi
     ok "Image transferred in $((SECONDS - TRANSFER_START))s"
   fi
 
@@ -529,7 +536,14 @@ deploy_ssh() {
 
       TRANSFER_START=$SECONDS
       info "Piping image over SSH (this may take a moment)..."
-      docker save "$TAG_LATEST" | $GZIP_CMD | ssh "$DEPLOY_SSH_HOST" "gunzip | sudo ${DEPLOY_DOCKER_BIN} load"
+      set +e
+      TRANSFER_OUTPUT=$( (set -o pipefail; docker save "$TAG_LATEST" | $GZIP_CMD | ssh "$DEPLOY_SSH_HOST" "gunzip | sudo ${DEPLOY_DOCKER_BIN} load") 2>&1 )
+      TRANSFER_EXIT=$?
+      set -e
+      if [ "$TRANSFER_EXIT" -ne 0 ]; then
+        echo "$TRANSFER_OUTPUT" | sed 's/^/  /'
+        fail "Image transfer failed (exit ${TRANSFER_EXIT}) — check NAS Docker daemon health"
+      fi
       ok "Image transferred in $((SECONDS - TRANSFER_START))s"
     fi
 

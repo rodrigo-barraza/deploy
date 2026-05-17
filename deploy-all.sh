@@ -907,6 +907,91 @@ if ! $NO_PARALLEL; then
   init_semaphore
 fi
 
+# ══════════════════════════════════════════════════════════════
+# PHASE 0 — LIBRARY SYNC
+# Git-hosted libraries commit their dist/ so downstream services
+# get pre-built JS via npm ci (no prepare/tsc needed). This phase
+# pulls latest, rebuilds dist/ if source changed, and pushes.
+# ══════════════════════════════════════════════════════════════
+
+# Discover library projects from projects.json (topological order)
+LIBRARY_IDS=()
+eval "$(node -e "
+  const s = require('$PROJECTS_JSON');
+  const libs = s.projects.filter(p => p.projectType === 'Library');
+  // Topological sort: emit libraries with no deps first
+  const libIds = new Set(libs.map(l => l.id));
+  const sorted = [];
+  const visited = new Set();
+  function visit(id) {
+    if (visited.has(id)) return;
+    visited.add(id);
+    const lib = libs.find(l => l.id === id);
+    if (!lib) return;
+    for (const dep of (lib.dependsOn || [])) {
+      if (libIds.has(dep.id)) visit(dep.id);
+    }
+    sorted.push(id);
+  }
+  libs.forEach(l => visit(l.id));
+  console.log('LIBRARY_IDS=(' + sorted.join(' ') + ')');
+")"
+
+if [ ${#LIBRARY_IDS[@]} -gt 0 ] && ! $DRY_RUN; then
+  echo ""
+  printf '%s%s┌──────────────────────────────────────────────────────────┐%s\n' "$YELLOW" "$BOLD" "$RESET"
+  printf '%s%s│  PHASE 0 — LIBRARY SYNC                                 │%s\n' "$YELLOW" "$BOLD" "$RESET"
+  printf '%s%s│  Pull, rebuild dist/, and push shared libraries          │%s\n' "$YELLOW" "$BOLD" "$RESET"
+  printf '%s%s└──────────────────────────────────────────────────────────┘%s\n' "$YELLOW" "$BOLD" "$RESET"
+
+  for lib_id in "${LIBRARY_IDS[@]}"; do
+    lib_dir="${ROOT_DIR}/${lib_id}"
+    if [ ! -d "$lib_dir" ]; then
+      warn "${lib_id}: directory not found — skipping"
+      continue
+    fi
+
+    step "Syncing ${lib_id}"
+
+    # Pull latest
+    if ! $SKIP_PULL; then
+      (cd "$lib_dir" && git pull --ff-only 2>&1 | sed 's/^/  /')
+    fi
+
+    # Check if src/ changed since dist/ was last built
+    # Compare the newest file in src/ against dist/index.js
+    lib_needs_rebuild=false
+    if [ ! -f "${lib_dir}/dist/index.js" ]; then
+      lib_needs_rebuild=true
+    else
+      # Check if any src file is newer than dist/index.js
+      src_newer=$(find "${lib_dir}/src" -name '*.ts' -o -name '*.tsx' 2>/dev/null | head -1)
+      if [ -n "$src_newer" ]; then
+        if [ -n "$(find "${lib_dir}/src" \( -name '*.ts' -o -name '*.tsx' \) -newer "${lib_dir}/dist/index.js" 2>/dev/null | head -1)" ]; then
+          lib_needs_rebuild=true
+        fi
+      fi
+    fi
+
+    if $lib_needs_rebuild; then
+      info "Source changed — rebuilding dist/"
+      (cd "$lib_dir" && npm run build 2>&1 | sed 's/^/  /')
+
+      # Stage, commit, and push if dist/ changed
+      if (cd "$lib_dir" && ! git diff --quiet dist/ 2>/dev/null) || \
+         (cd "$lib_dir" && git ls-files --others --exclude-standard dist/ 2>/dev/null | grep -q .); then
+        (cd "$lib_dir" && git add dist/ && git commit -m "build: rebuild dist/" --no-verify 2>&1 | sed 's/^/  /')
+        (cd "$lib_dir" && git push origin HEAD 2>&1 | sed 's/^/  /')
+        ok "${lib_id}: dist/ rebuilt and pushed"
+      else
+        ok "${lib_id}: dist/ already up to date"
+      fi
+    else
+      ok "${lib_id}: no source changes — skipping rebuild"
+    fi
+  done
+fi
+
 # ── Validate all services have deploy.sh ──────────────────────
 step "Pre-flight check"
 MISSING=()
