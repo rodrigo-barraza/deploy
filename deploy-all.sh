@@ -657,7 +657,15 @@ restart_tier() {
         fail "${svc}: transfer failed — skipping"
         echo "FAIL" > "${LOG_DIR}/${svc}.deploy.status"
       else
-        echo "SKIP" > "${LOG_DIR}/${svc}.deploy.status"
+        # Transfer was skipped — check if the underlying build failed
+        local _underlying_build
+        _underlying_build=$(cat "${LOG_DIR}/${svc}.build.status" 2>/dev/null || echo "SKIP")
+        if [ "$_underlying_build" = "FAIL" ]; then
+          fail "${svc}: build failed — skipping"
+          echo "FAIL" > "${LOG_DIR}/${svc}.deploy.status"
+        else
+          echo "SKIP" > "${LOG_DIR}/${svc}.deploy.status"
+        fi
       fi
     fi
   done
