@@ -1130,19 +1130,12 @@ declare -A TIER_LABELS=(
 )
 
 # ══════════════════════════════════════════════════════════════
-# PRE-BUILD — Nuke BuildKit cache
-# BuildKit caches every RUN/COPY layer and grows unbounded.
-# On WSL2 this bloats the VHDX since it never auto-shrinks.
-# Wipe all cache before building — avoids the slow docker system df
-# check and prevents accumulation entirely.
+# PRE-BUILD — Dangling image cleanup only
+# BuildKit cache is nuked once in Phase 3 after deploy completes.
+# Pre-build, we only clean dangling images (instant) to free
+# layer refs before the build phase starts.
 # ══════════════════════════════════════════════════════════════
 if ! $DRY_RUN; then
-  step "Pruning all BuildKit build cache"
-  BUILDER_PRUNE_OUTPUT=$(docker builder prune -f --all 2>/dev/null || true)
-  BUILDER_RECLAIMED=$(echo "$BUILDER_PRUNE_OUTPUT" | grep 'Total reclaimed space' || echo "0B reclaimed")
-  ok "Pre-build cache pruned — ${BUILDER_RECLAIMED}"
-
-  # Also prune dangling images
   docker image prune -f 2>/dev/null | grep -v 'Total reclaimed space: 0B' | sed 's/^/  /' || true
 fi
 
@@ -1392,8 +1385,9 @@ if ! $DRY_RUN; then
   fi
 
   # ── Prune BuildKit build cache ──────────────────────────────
-  # Nuke all build cache after deploy. Every deploy gets cold builds
-  # but prevents unbounded VHDX growth from BuildKit layer caching.
+  # Nuke all build cache after deploy. This is the ONLY cache prune
+  # in the pipeline (pre-build prune was removed — it was redundant).
+  # Every deploy gets cold builds, but prevents unbounded VHDX growth.
   step "Pruning all BuildKit build cache"
   BUILDER_PRUNE_OUTPUT=$(docker builder prune -f --all 2>/dev/null || true)
   BUILDER_RECLAIMED=$(echo "$BUILDER_PRUNE_OUTPUT" | grep 'Total reclaimed space' || echo "0B reclaimed")
