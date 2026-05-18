@@ -1136,17 +1136,17 @@ declare -A TIER_LABELS=(
 # Enforce a cap BEFORE building to prevent accumulation.
 # ══════════════════════════════════════════════════════════════
 if ! $DRY_RUN; then
-  # Parse current build cache size in bytes
-  CACHE_SIZE_BYTES=$(docker system df --format '{{.Size}}' 2>/dev/null | tail -1 | awk '
+  # Parse current build cache size — single call (docker system df is very slow on large caches)
+  CACHE_SIZE_HUMAN=$(docker system df --format '{{.Size}}' 2>/dev/null | tail -1 || echo "unknown")
+  CACHE_SIZE_BYTES=$(echo "$CACHE_SIZE_HUMAN" | awk '
     /TB/ { printf "%.0f\n", $1 * 1024 * 1024 * 1024 * 1024; next }
     /GB/ { printf "%.0f\n", $1 * 1024 * 1024 * 1024; next }
     /MB/ { printf "%.0f\n", $1 * 1024 * 1024; next }
     /kB/ { printf "%.0f\n", $1 * 1024; next }
     /B/  { printf "%.0f\n", $1; next }
     { print 0 }
-  ' || echo "0")
+  ')
   CACHE_MAX_BYTES=$((MAX_BUILD_CACHE_GB * 1024 * 1024 * 1024))
-  CACHE_SIZE_HUMAN=$(docker system df --format '{{.Size}}' 2>/dev/null | tail -1 || echo "unknown")
 
   if [ "$CACHE_SIZE_BYTES" -gt "$CACHE_MAX_BYTES" ] 2>/dev/null; then
     echo ""
@@ -1418,7 +1418,6 @@ if ! $DRY_RUN; then
   # the cache grows by hundreds of MB per deploy and never shrinks.
   # Keep cache entries from the last 72h for rebuild speed; purge the rest.
   step "Pruning BuildKit build cache (keeping last 72h)"
-  BUILD_CACHE_BEFORE=$(docker system df --format '{{.Size}}' 2>/dev/null | tail -1 || echo "unknown")
   BUILDER_PRUNE_OUTPUT=$(docker builder prune -f --filter 'until=72h' 2>/dev/null || true)
   BUILDER_RECLAIMED=$(echo "$BUILDER_PRUNE_OUTPUT" | grep 'Total reclaimed space' || echo "0B reclaimed")
   ok "Build cache pruned — ${BUILDER_RECLAIMED}"
