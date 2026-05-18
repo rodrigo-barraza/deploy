@@ -207,7 +207,7 @@ if ! $DEPLOY_ONLY; then
     GIT_DEPS=$(node -e "
       const p = require('./package.json');
       const all = { ...p.dependencies, ...p.devDependencies };
-      const git = Object.keys(all).filter(k => /^git\\+/.test(all[k]));
+      const git = Object.keys(all).filter(k => /^(git\+|github:)/.test(all[k]));
       if (git.length) console.log(git.join(' '));
     " 2>/dev/null || true)
     if [ -n "$GIT_DEPS" ]; then
