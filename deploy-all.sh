@@ -1028,6 +1028,45 @@ if [ ${#LIBRARY_IDS[@]} -gt 0 ] && ! $DRY_RUN; then
       ok "${lib_id}: dist/ already up to date"
     fi
   done
+
+  # ── Refresh inter-library git dependencies ─────────────────
+  # Libraries that depend on other libraries via git+https:// may
+  # have stale copies in node_modules after upstream dist/ was rebuilt
+  # and pushed. Re-install to pull the fresh commit.
+  for lib_id in "${LIBRARY_IDS[@]}"; do
+    lib_dir="${ROOT_DIR}/${lib_id}"
+    [ -d "$lib_dir" ] || continue
+
+    # Check if this library has any git-based deps on other libraries
+    _needs_refresh=false
+    for other_id in "${LIBRARY_IDS[@]}"; do
+      [ "$other_id" = "$lib_id" ] && continue
+      if grep -q "\"@rodrigo-barraza/${other_id}\"" "$lib_dir/package.json" 2>/dev/null; then
+        _needs_refresh=true
+        break
+      fi
+    done
+
+    if $_needs_refresh; then
+      step "Refreshing ${lib_id} dependencies (inter-library git deps)"
+      (cd "$lib_dir" && npm install 2>&1) | sed 's/^/  /' || warn "${lib_id}: npm install failed"
+      # Rebuild after refreshing deps
+      info "Rebuilding ${lib_id} with updated dependencies"
+      if (cd "$lib_dir" && npm run build 2>&1) | sed 's/^/  /'; then
+        # Commit + push if dist/ changed after rebuild
+        if ! (cd "$lib_dir" && git diff --quiet dist/ 2>/dev/null) || \
+           [ -n "$(cd "$lib_dir" && git ls-files --others --exclude-standard dist/ 2>/dev/null)" ]; then
+          (cd "$lib_dir" && git add dist/ && git commit -m "build: rebuild dist/ with updated deps" --no-verify 2>&1) | sed 's/^/  /' || true
+          (cd "$lib_dir" && git push origin HEAD 2>&1) | sed 's/^/  /' || true
+          ok "${lib_id}: rebuilt and pushed with fresh deps"
+        else
+          ok "${lib_id}: dist/ unchanged after dep refresh"
+        fi
+      else
+        warn "${lib_id}: rebuild with updated deps failed — continuing with existing dist/"
+      fi
+    fi
+  done
 fi
 
 # ── Validate all services have deploy.sh ──────────────────────
