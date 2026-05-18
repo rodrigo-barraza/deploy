@@ -171,7 +171,7 @@ COMPACT_WSL=false
 GROUP=""
 MAX_CONCURRENT_BUILDS=32  # Limit concurrent docker builds to prevent I/O saturation
 MAX_CONCURRENT_SSH=6      # Limit concurrent SSH operations to prevent MaxSessions drop
-MAX_BUILD_CACHE_GB=10     # Max BuildKit cache in GB before pre-build prune (prevents VHDX bloat)
+
 for arg in "$@"; do
   case "$arg" in
     --dry-run)        DRY_RUN=true ;;
@@ -189,7 +189,7 @@ for arg in "$@"; do
     --bots)           GROUP="${GROUP:+${GROUP},}bot" ;;
     --vault)          GROUP="${GROUP:+${GROUP},}vault" ;;
     --max-builds=*)   MAX_CONCURRENT_BUILDS="${arg#--max-builds=}" ;;
-    --max-cache=*)    MAX_BUILD_CACHE_GB="${arg#--max-cache=}" ;;
+
   esac
 done
 
@@ -1130,41 +1130,20 @@ declare -A TIER_LABELS=(
 )
 
 # ══════════════════════════════════════════════════════════════
-# PRE-BUILD — Build cache cap enforcement
+# PRE-BUILD — Nuke BuildKit cache
 # BuildKit caches every RUN/COPY layer and grows unbounded.
 # On WSL2 this bloats the VHDX since it never auto-shrinks.
-# Enforce a cap BEFORE building to prevent accumulation.
+# Wipe all cache before building — avoids the slow docker system df
+# check and prevents accumulation entirely.
 # ══════════════════════════════════════════════════════════════
 if ! $DRY_RUN; then
-  # Parse current build cache size — single call (docker system df is very slow on large caches)
-  CACHE_SIZE_HUMAN=$(docker system df --format '{{.Size}}' 2>/dev/null | tail -1 || echo "unknown")
-  CACHE_SIZE_BYTES=$(echo "$CACHE_SIZE_HUMAN" | awk '
-    /TB/ { printf "%.0f\n", $1 * 1024 * 1024 * 1024 * 1024; next }
-    /GB/ { printf "%.0f\n", $1 * 1024 * 1024 * 1024; next }
-    /MB/ { printf "%.0f\n", $1 * 1024 * 1024; next }
-    /kB/ { printf "%.0f\n", $1 * 1024; next }
-    /B/  { printf "%.0f\n", $1; next }
-    { print 0 }
-  ')
-  CACHE_MAX_BYTES=$((MAX_BUILD_CACHE_GB * 1024 * 1024 * 1024))
+  step "Pruning all BuildKit build cache"
+  BUILDER_PRUNE_OUTPUT=$(docker builder prune -f --all 2>/dev/null || true)
+  BUILDER_RECLAIMED=$(echo "$BUILDER_PRUNE_OUTPUT" | grep 'Total reclaimed space' || echo "0B reclaimed")
+  ok "Pre-build cache pruned — ${BUILDER_RECLAIMED}"
 
-  if [ "$CACHE_SIZE_BYTES" -gt "$CACHE_MAX_BYTES" ] 2>/dev/null; then
-    echo ""
-    printf '%s%s┌──────────────────────────────────────────────────────────┐%s\n' "$YELLOW" "$BOLD" "$RESET"
-    printf '%s%s│  PRE-BUILD — Build cache over %sGB cap (%s)          │%s\n' "$YELLOW" "$BOLD" "$MAX_BUILD_CACHE_GB" "$CACHE_SIZE_HUMAN" "$RESET"
-    printf '%s%s│  Pruning to prevent WSL2 VHDX growth                    │%s\n' "$YELLOW" "$BOLD" "$RESET"
-    printf '%s%s└──────────────────────────────────────────────────────────┘%s\n' "$YELLOW" "$BOLD" "$RESET"
-
-    step "Pruning build cache exceeding ${MAX_BUILD_CACHE_GB}GB cap (current: ${CACHE_SIZE_HUMAN})"
-    BUILDER_PRUNE_OUTPUT=$(docker builder prune -f --keep-storage "${CACHE_MAX_BYTES}" 2>/dev/null || true)
-    BUILDER_RECLAIMED=$(echo "$BUILDER_PRUNE_OUTPUT" | grep 'Total reclaimed space' || echo "0B reclaimed")
-    ok "Pre-build cache pruned — ${BUILDER_RECLAIMED}"
-
-    # Also prune dangling images while we're at it
-    docker image prune -f 2>/dev/null | grep -v 'Total reclaimed space: 0B' | sed 's/^/  /' || true
-  else
-    info "Build cache: ${CACHE_SIZE_HUMAN} (under ${MAX_BUILD_CACHE_GB}GB cap)"
-  fi
+  # Also prune dangling images
+  docker image prune -f 2>/dev/null | grep -v 'Total reclaimed space: 0B' | sed 's/^/  /' || true
 fi
 
 # ══════════════════════════════════════════════════════════════
@@ -1413,12 +1392,10 @@ if ! $DRY_RUN; then
   fi
 
   # ── Prune BuildKit build cache ──────────────────────────────
-  # This is the primary source of WSL2 VHDX growth. BuildKit caches
-  # every RUN/COPY layer across all 20+ service builds. Without this,
-  # the cache grows by hundreds of MB per deploy and never shrinks.
-  # Keep cache entries from the last 72h for rebuild speed; purge the rest.
-  step "Pruning BuildKit build cache (keeping last 72h)"
-  BUILDER_PRUNE_OUTPUT=$(docker builder prune -f --filter 'until=72h' 2>/dev/null || true)
+  # Nuke all build cache after deploy. Every deploy gets cold builds
+  # but prevents unbounded VHDX growth from BuildKit layer caching.
+  step "Pruning all BuildKit build cache"
+  BUILDER_PRUNE_OUTPUT=$(docker builder prune -f --all 2>/dev/null || true)
   BUILDER_RECLAIMED=$(echo "$BUILDER_PRUNE_OUTPUT" | grep 'Total reclaimed space' || echo "0B reclaimed")
   ok "Build cache pruned — ${BUILDER_RECLAIMED}"
 
